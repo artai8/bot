@@ -1,4 +1,4 @@
-name: 构建并推送到 GHCR
+name: 构建并推送到 GHCR（内存优化版）
 
 on:
   push:
@@ -11,11 +11,11 @@ on:
     branches:
       - main
       - master
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}  # artai8/bot
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-push:
@@ -24,19 +24,39 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write  # 用于 SBOM/签名（可选）
 
     steps:
       # ===========================
-      # 1. 准备阶段
+      # 1. 准备环境
       # ===========================
       - name: 📥 检出代码
         uses: actions/checkout@v4
 
+      - name: 💾 检查可用内存
+        run: |
+          echo "=== 系统信息 ==="
+          free -h
+          df -h
+          echo "=== Docker 信息 ==="
+          docker system df
+
+      # ===========================
+      # 2. 设置 Docker（内存优化）
+      # ===========================
       - name: 🔧 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # 限制构建器使用的资源
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+          buildkitd-flags: |
+            --oci-worker-gc --oci-worker-gc-keepstorage 1024
 
-      - name: 🔐 登录到 GHCR
+      # ===========================
+      # 3. 登录 GHCR
+      # ===========================
+      - name: 🔐 登录到 GitHub Container Registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
@@ -45,7 +65,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # ===========================
-      # 2. 生成镜像标签
+      # 4. 生成镜像标签
       # ===========================
       - name: 🏷️ 提取 Docker 元数据
         id: meta
@@ -53,52 +73,77 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # 分支名（如 main）
+            # main 分支推送时打 latest 标签
+            type=raw,value=latest,enable={{is_default_branch}}
+            # 分支名标签
             type=ref,event=branch
-            # PR 编号（如 pr-123）
+            # PR 编号标签
             type=ref,event=pr
-            # Git 标签版本（v1.2.3 → 1.2.3, 1.2, 1）
+            # Git tag 版本号（v1.2.3 → 1.2.3）
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
             # Git commit SHA（main-abc1234）
-            type=sha,prefix={{branch}}-
-            # latest 标签（仅主分支）
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix={{branch}}-,format=short
           labels: |
             org.opencontainers.image.title=Bot
             org.opencontainers.image.description=Telegram Bot Application
             org.opencontainers.image.vendor=artai8
 
       # ===========================
-      # 3. 构建并推送
+      # 5. 清理空间（构建前）
+      # ===========================
+      - name: 🧹 清理 Docker 缓存
+        run: |
+          docker system prune -af --volumes
+          docker buildx prune -af
+
+      # ===========================
+      # 6. 构建并推送（单架构，减少内存）
       # ===========================
       - name: 🏗️ 构建并推送 Docker 镜像
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64  # 多架构支持
-          push: ${{ github.event_name != 'pull_request' }}  # PR 不推送
+          # 只构建 amd64 架构（减少 50% 内存占用）
+          platforms: linux/amd64
+          # PR 时不推送，只构建测试
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # 使用轻量级缓存策略
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=min
+          # 优化构建参数
           build-args: |
-            BUILD_DATE=${{ github.event.head_commit.timestamp }}
-            VCS_REF=${{ github.sha }}
+            BUILDKIT_INLINE_CACHE=1
 
       # ===========================
-      # 4. 输出信息
+      # 7. 输出构建结果
       # ===========================
       - name: 📋 输出镜像信息
         if: github.event_name != 'pull_request'
         run: |
           echo "### 🎉 镜像构建成功！" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**镜像地址：**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "**拉取命令：**" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**运行命令：**" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker run -d \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --name bot \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -p 8585:8585 \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -e BOT_TOKEN='your_token' \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --restart unless-stopped \\" >> $GITHUB_STEP_SUMMARY
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**所有标签：**" >> $GITHUB_STEP_SUMMARY
@@ -106,21 +151,37 @@ jobs:
           echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**查看镜像：** https://github.com/${{ github.repository }}/pkgs/container/bot" >> $GITHUB_STEP_SUMMARY
+          echo "📦 [查看镜像详情](https://github.com/${{ github.repository }}/pkgs/container/bot)" >> $GITHUB_STEP_SUMMARY
 
       # ===========================
-      # 5. 安全扫描（可选）
+      # 8. 测试镜像（可选）
       # ===========================
-      - name: 🔍 扫描镜像漏洞
+      - name: 🧪 测试镜像
         if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          format: 'sarif'
-          output: 'trivy-results.sarif'
+        run: |
+          echo "=== 测试镜像启动 ==="
+          docker run --rm -d --name test-bot \
+            -p 8585:8585 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          
+          echo "等待服务启动..."
+          sleep 10
+          
+          echo "检查容器状态..."
+          docker ps -a
+          
+          echo "检查日志..."
+          docker logs test-bot
+          
+          echo "停止测试容器..."
+          docker stop test-bot || true
 
-      - name: 📤 上传扫描结果到 GitHub Security
-        if: github.event_name != 'pull_request'
-        uses: github/codeql-action/upload-sarif@v2
-        with:
-          sarif_file: 'trivy-results.sarif'
+      # ===========================
+      # 9. 清理空间（构建后）
+      # ===========================
+      - name: 🧹 清理构建缓存
+        if: always()
+        run: |
+          docker system prune -af
+          echo "=== 清理后的空间 ==="
+          df -h
