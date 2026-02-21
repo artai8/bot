@@ -412,7 +412,7 @@ async def api_share_forward(request):
         suffix = ""
         if keywords:
             kw = html.escape(str(keywords[0]))
-            suffix = f"\n\n<blockquote>在评论区回复 <code>（{kw}）</code> 获取内容</blockquote>"
+            suffix = f"\n\n<code>在评论区输入（{kw}）查看资源</code>"
         group_text = share.get('group_text', '') or ''
         caption = group_text
         if suffix:
