@@ -1,0 +1,47 @@
+# Git 文件
+.git
+.gitignore
+.github
+
+# Python 缓存
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+
+# 环境配置
+.env
+.env.local
+*.env
+
+# IDE 配置
+.vscode
+.idea
+*.swp
+*.swo
+
+# 日志和数据库
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# 文档
+README.md
+LICENSE
+docs/
+
+# Docker 相关
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# 其他
+.DS_Store
+*.md
