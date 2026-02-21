@@ -5,7 +5,7 @@ from plugins import web_server
 
 import pyromod.listen
 from pyrogram import Client
-from pyrogram.enums import ParseMode
+from pyrogram.enums import ParseMode, ChatMemberStatus, ChatType
 from pyrogram.errors import FloodWait
 from pyrogram.types import BotCommand
 import sys
@@ -110,8 +110,19 @@ class Bot(Client):
         try:
             db_channel = await self.get_chat(CHANNEL_ID)
             self.db_channel = db_channel
-            test = await self.send_message(chat_id=db_channel.id, text="Test Message")
-            await test.delete()
+            member = await self.get_chat_member(chat_id=db_channel.id, user_id="me")
+            if db_channel.type == ChatType.CHANNEL:
+                if member.status not in [ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR]:
+                    self.LOGGER(__name__).warning("Bot is not admin in DB Channel")
+                    sys.exit()
+            else:
+                if member.status not in [
+                    ChatMemberStatus.OWNER,
+                    ChatMemberStatus.ADMINISTRATOR,
+                    ChatMemberStatus.MEMBER
+                ]:
+                    self.LOGGER(__name__).warning("Bot is not a member of DB Channel")
+                    sys.exit()
         except Exception as e:
             self.LOGGER(__name__).warning(f"Error with DB Channel: {e}")
             self.LOGGER(__name__).warning("Make sure bot is Admin in DB Channel")
