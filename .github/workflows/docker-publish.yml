@@ -1,164 +1,65 @@
-name: 构建并推送到 GHCR（极限内存优化版）
+name: Build & Push to GHCR
 
 on:
   push:
-    branches:
-      - main
-      - master
-    tags:
-      - 'v*.*.*'
-  pull_request:
-    branches:
-      - main
-      - master
+    branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
-
-permissions:
-  contents: read
-  packages: write
 
 env:
   REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    
-    steps:
-      # ===========================
-      # 1. 释放磁盘空间（重要！）
-      # ===========================
-      - name: 🧹 释放磁盘空间
-        run: |
-          echo "=== 清理前 ==="
-          df -h
-          
-          # 删除不需要的软件
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          
-          # 清理 apt 缓存
-          sudo apt-get clean
-          
-          # 清理 Docker
-          docker system prune -af --volumes
-          
-          echo "=== 清理后 ==="
-          df -h
 
-      # ===========================
-      # 2. 检出代码
-      # ===========================
-      - name: 📥 检出代码
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # 1. 检出代码
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ===========================
-      # 3. 生成小写镜像名
-      # ===========================
-      - name: 🔤 生成镜像信息
-        id: image
-        run: |
-          IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
-          echo "📦 镜像: ${{ env.REGISTRY }}/${IMAGE_NAME}"
+      # 2. 设置 Docker Buildx（支持缓存）
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      # ===========================
-      # 4. 登录 GHCR
-      # ===========================
-      - name: 🔐 登录 GHCR
-        if: github.event_name != 'pull_request'
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      # 3. 登录 GHCR
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ===========================
-      # 5. 构建镜像（内存优化）
-      # ===========================
-      - name: 🏗️ 构建 Docker 镜像
-        run: |
-          # 禁用 BuildKit 并行构建（减少内存）
-          export DOCKER_BUILDKIT=0
-          
-          # 设置内存限制
-          IMAGE_TAG="${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ github.ref_name }}"
-          LATEST_TAG="${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:latest"
-          
-          echo "🔨 开始构建..."
-          echo "镜像标签: ${IMAGE_TAG}"
-          
-          # 单线程构建，减少内存占用
-          docker build \
-            --memory=900m \
-            --memory-swap=1500m \
-            --cpu-quota=100000 \
-            --no-cache \
-            --compress \
-            --force-rm \
-            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            --label "org.opencontainers.image.revision=${{ github.sha }}" \
-            -t "${IMAGE_TAG}" \
-            -t "${LATEST_TAG}" \
-            .
-          
-          echo "✅ 构建完成"
-          docker images
+      # 4. 提取元数据（自动生成标签）
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # 对 main/master 分支 → latest
+            type=raw,value=latest,enable={{is_default_branch}}
+            # 对 tag 推送 → v1.0.0
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # 每次构建 → sha-abc1234
+            type=sha,prefix=sha-,format=short
 
-      # ===========================
-      # 6. 推送镜像
-      # ===========================
-      - name: 🚀 推送镜像
-        if: github.event_name != 'pull_request'
-        run: |
-          IMAGE_TAG="${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ github.ref_name }}"
-          LATEST_TAG="${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:latest"
-          
-          echo "📤 推送 ${IMAGE_TAG}..."
-          docker push "${IMAGE_TAG}"
-          
-          # 只在 main/master 分支推送 latest
-          if [[ "${{ github.ref_name }}" == "main" || "${{ github.ref_name }}" == "master" ]]; then
-            echo "📤 推送 ${LATEST_TAG}..."
-            docker push "${LATEST_TAG}"
-          fi
-          
-          echo "✅ 推送完成"
-
-      # ===========================
-      # 7. 输出结果
-      # ===========================
-      - name: 📋 输出镜像信息
-        if: github.event_name != 'pull_request'
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ## 🎉 镜像构建成功！
-
-          **拉取镜像：**
-          \`\`\`bash
-          docker pull ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:latest
-          \`\`\`
-
-          **运行容器：**
-          \`\`\`bash
-          docker run -d \\
-            --name bot \\
-            -p 8585:8585 \\
-            -e BOT_TOKEN='your_token' \\
-            --restart unless-stopped \\
-            ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:latest
-          \`\`\`
-
-          **镜像标签：**
-          - \`${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ github.ref_name }}\`
-          - \`${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:latest\`
-
-          📦 [查看镜像](https://github.com/${{ github.repository }}/pkgs/container/bot)
-          EOF
-
-      # ===========================
-      # 8. 清理
-      # ===========================
-      - name: 🧹 清理
-        if: always()
-        run: |
-          docker system prune -af
+      # 5. 构建并推送
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GitHub Actions 缓存（加速后续构建）
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 构建时不保留中间容器
+          provenance: false
