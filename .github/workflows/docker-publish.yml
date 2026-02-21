@@ -1,187 +1,345 @@
-name: 构建并推送到 GHCR（内存优化版）
+name: 🔍 GHCR 推送诊断工具
 
 on:
+  workflow_dispatch:  # 手动触发
   push:
     branches:
       - main
-      - master
-    tags:
-      - 'v*.*.*'
-  pull_request:
-    branches:
-      - main
-      - master
-  workflow_dispatch:
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+permissions:
+  contents: read
+  packages: write
+  actions: read
 
 jobs:
-  build-and-push:
+  diagnose:
     runs-on: ubuntu-latest
     
-    permissions:
-      contents: read
-      packages: write
-
     steps:
       # ===========================
-      # 1. 准备环境
+      # 1. 环境信息收集
+      # ===========================
+      - name: 📊 收集系统信息
+        run: |
+          echo "## 🖥️ 系统信息" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "Runner OS: $(uname -a)" >> $GITHUB_STEP_SUMMARY
+          echo "Docker Version: $(docker --version)" >> $GITHUB_STEP_SUMMARY
+          echo "Buildx Version: $(docker buildx version)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## 💾 资源状态" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          free -h >> $GITHUB_STEP_SUMMARY
+          df -h >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      # ===========================
+      # 2. GitHub 上下文信息
+      # ===========================
+      - name: 🔍 检查 GitHub 上下文
+        run: |
+          echo "## 🔐 GitHub 上下文" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          echo "Repository: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "Repository Owner: ${{ github.repository_owner }}" >> $GITHUB_STEP_SUMMARY
+          echo "Actor: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "Event Name: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "Ref: ${{ github.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "SHA: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## 🎯 目标镜像信息" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "Image Name (lowercase): ghcr.io/${IMAGE_NAME}" >> $GITHUB_STEP_SUMMARY
+          echo "Image Tag: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      # ===========================
+      # 3. 检查 GITHUB_TOKEN
+      # ===========================
+      - name: 🔑 验证 GITHUB_TOKEN
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "## 🔑 Token 验证" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "❌ GITHUB_TOKEN 为空！" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "✅ GITHUB_TOKEN 存在" >> $GITHUB_STEP_SUMMARY
+            echo "Token 长度: ${#GITHUB_TOKEN} 字符" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # 测试 token 权限
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 测试 GitHub API 访问" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          response=$(curl -s -w "\n%{http_code}" -H "Authorization: token $GITHUB_TOKEN" \
+            https://api.github.com/user)
+          
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          
+          echo "HTTP 状态码: $http_code" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$http_code" = "200" ]; then
+            echo "✅ API 访问成功" >> $GITHUB_STEP_SUMMARY
+            echo "$body" | jq -r '.login' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ API 访问失败" >> $GITHUB_STEP_SUMMARY
+            echo "$body" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      # ===========================
+      # 4. 检出代码
       # ===========================
       - name: 📥 检出代码
         uses: actions/checkout@v4
 
-      - name: 💾 检查可用内存
-        run: |
-          echo "=== 系统信息 ==="
-          free -h
-          df -h
-          echo "=== Docker 信息 ==="
-          docker system df
-
       # ===========================
-      # 2. 设置 Docker（内存优化）
+      # 5. 设置 Docker Buildx
       # ===========================
       - name: 🔧 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          # 限制构建器使用的资源
-          driver-opts: |
-            image=moby/buildkit:latest
-            network=host
-          buildkitd-flags: |
-            --oci-worker-gc --oci-worker-gc-keepstorage 1024
 
       # ===========================
-      # 3. 登录 GHCR
+      # 6. 登录测试（详细日志）
       # ===========================
-      - name: 🔐 登录到 GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # ===========================
-      # 4. 生成镜像标签
-      # ===========================
-      - name: 🏷️ 提取 Docker 元数据
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            # main 分支推送时打 latest 标签
-            type=raw,value=latest,enable={{is_default_branch}}
-            # 分支名标签
-            type=ref,event=branch
-            # PR 编号标签
-            type=ref,event=pr
-            # Git tag 版本号（v1.2.3 → 1.2.3）
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            # Git commit SHA（main-abc1234）
-            type=sha,prefix={{branch}}-,format=short
-          labels: |
-            org.opencontainers.image.title=Bot
-            org.opencontainers.image.description=Telegram Bot Application
-            org.opencontainers.image.vendor=artai8
-
-      # ===========================
-      # 5. 清理空间（构建前）
-      # ===========================
-      - name: 🧹 清理 Docker 缓存
+      - name: 🔐 测试登录 GHCR（使用 GITHUB_TOKEN）
+        id: login
+        continue-on-error: true
         run: |
-          docker system prune -af --volumes
-          docker buildx prune -af
+          echo "## 🔐 登录测试" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          echo "尝试登录 ghcr.io..." >> $GITHUB_STEP_SUMMARY
+          echo "用户名: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          
+          if echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin 2>&1 | tee login.log; then
+            echo "✅ 登录成功！" >> $GITHUB_STEP_SUMMARY
+            echo "login_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 登录失败！" >> $GITHUB_STEP_SUMMARY
+            echo "login_success=false" >> $GITHUB_OUTPUT
+            cat login.log >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       # ===========================
-      # 6. 构建并推送（单架构，减少内存）
+      # 7. 创建测试 Dockerfile
       # ===========================
-      - name: 🏗️ 构建并推送 Docker 镜像
+      - name: 📝 创建测试 Dockerfile
+        run: |
+          cat > Dockerfile.test <<EOF
+          FROM alpine:3.19
+          RUN echo "Test image for GHCR push diagnostics"
+          CMD ["echo", "Hello from GHCR test"]
+          EOF
+          
+          echo "## 📄 测试 Dockerfile" >> $GITHUB_STEP_SUMMARY
+          echo '```dockerfile' >> $GITHUB_STEP_SUMMARY
+          cat Dockerfile.test >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      # ===========================
+      # 8. 构建测试镜像
+      # ===========================
+      - name: 🏗️ 构建测试镜像
+        id: build
+        continue-on-error: true
+        run: |
+          echo "## 🏗️ 构建阶段" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_TAG="ghcr.io/${IMAGE_NAME}:test-$(date +%s)"
+          
+          echo "构建镜像: $IMAGE_TAG" >> $GITHUB_STEP_SUMMARY
+          
+          if docker build -f Dockerfile.test -t "$IMAGE_TAG" . 2>&1 | tee build.log; then
+            echo "✅ 构建成功！" >> $GITHUB_STEP_SUMMARY
+            echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+            echo "build_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 构建失败！" >> $GITHUB_STEP_SUMMARY
+            echo "build_success=false" >> $GITHUB_OUTPUT
+            cat build.log >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      # ===========================
+      # 9. 推送测试（详细错误日志）
+      # ===========================
+      - name: 🚀 推送测试镜像（详细日志）
+        if: steps.login.outputs.login_success == 'true' && steps.build.outputs.build_success == 'true'
+        id: push
+        continue-on-error: true
+        run: |
+          echo "## 🚀 推送阶段" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          echo "推送镜像: $IMAGE_TAG" >> $GITHUB_STEP_SUMMARY
+          
+          # 启用详细日志
+          export DOCKER_BUILDKIT=1
+          export BUILDKIT_PROGRESS=plain
+          
+          if docker push "$IMAGE_TAG" 2>&1 | tee push.log; then
+            echo "✅ 推送成功！" >> $GITHUB_STEP_SUMMARY
+            echo "push_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 推送失败！" >> $GITHUB_STEP_SUMMARY
+            echo "push_success=false" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 详细错误日志：" >> $GITHUB_STEP_SUMMARY
+            cat push.log >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      # ===========================
+      # 10. 使用 docker/build-push-action 测试
+      # ===========================
+      - name: 🧪 使用官方 Action 推送测试
+        if: steps.login.outputs.login_success == 'true'
+        id: action-push
+        continue-on-error: true
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
-          # 只构建 amd64 架构（减少 50% 内存占用）
+          file: ./Dockerfile.test
+          push: true
+          tags: ghcr.io/${{ github.repository }}:action-test
           platforms: linux/amd64
-          # PR 时不推送，只构建测试
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # 使用轻量级缓存策略
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=min
-          # 优化构建参数
-          build-args: |
-            BUILDKIT_INLINE_CACHE=1
 
       # ===========================
-      # 7. 输出构建结果
+      # 11. 检查推送结果
       # ===========================
-      - name: 📋 输出镜像信息
-        if: github.event_name != 'pull_request'
-        run: |
-          echo "### 🎉 镜像构建成功！" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**镜像地址：**" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**拉取命令：**" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**运行命令：**" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "docker run -d \\" >> $GITHUB_STEP_SUMMARY
-          echo "  --name bot \\" >> $GITHUB_STEP_SUMMARY
-          echo "  -p 8585:8585 \\" >> $GITHUB_STEP_SUMMARY
-          echo "  -e BOT_TOKEN='your_token' \\" >> $GITHUB_STEP_SUMMARY
-          echo "  --restart unless-stopped \\" >> $GITHUB_STEP_SUMMARY
-          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**所有标签：**" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "📦 [查看镜像详情](https://github.com/${{ github.repository }}/pkgs/container/bot)" >> $GITHUB_STEP_SUMMARY
-
-      # ===========================
-      # 8. 测试镜像（可选）
-      # ===========================
-      - name: 🧪 测试镜像
-        if: github.event_name != 'pull_request'
-        run: |
-          echo "=== 测试镜像启动 ==="
-          docker run --rm -d --name test-bot \
-            -p 8585:8585 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          
-          echo "等待服务启动..."
-          sleep 10
-          
-          echo "检查容器状态..."
-          docker ps -a
-          
-          echo "检查日志..."
-          docker logs test-bot
-          
-          echo "停止测试容器..."
-          docker stop test-bot || true
-
-      # ===========================
-      # 9. 清理空间（构建后）
-      # ===========================
-      - name: 🧹 清理构建缓存
+      - name: 📊 推送结果分析
         if: always()
         run: |
-          docker system prune -af
-          echo "=== 清理后的空间 ==="
-          df -h
+          echo "## 📊 测试结果汇总" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "| 测试项 | 结果 |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------|" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.login.outputs.login_success }}" = "true" ]; then
+            echo "| GHCR 登录 | ✅ 成功 |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| GHCR 登录 | ❌ 失败 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ steps.build.outputs.build_success }}" = "true" ]; then
+            echo "| 镜像构建 | ✅ 成功 |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| 镜像构建 | ❌ 失败 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ steps.push.outputs.push_success }}" = "true" ]; then
+            echo "| 手动推送 | ✅ 成功 |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| 手动推送 | ❌ 失败 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ steps.action-push.outcome }}" = "success" ]; then
+            echo "| Action 推送 | ✅ 成功 |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Action 推送 | ❌ 失败 |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # ===========================
+      # 12. 检查已存在的 Package 权限
+      # ===========================
+      - name: 🔍 检查 Package 权限
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📦 检查现有 Package" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          PACKAGE_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          
+          response=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}")
+          
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          
+          if [ "$http_code" = "200" ]; then
+            echo "✅ Package 已存在" >> $GITHUB_STEP_SUMMARY
+            echo "$body" | jq '.' >> $GITHUB_STEP_SUMMARY
+          elif [ "$http_code" = "404" ]; then
+            echo "ℹ️ Package 不存在（首次推送）" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ 无法检查 Package（HTTP $http_code）" >> $GITHUB_STEP_SUMMARY
+            echo "$body" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      # ===========================
+      # 13. 上传日志文件
+      # ===========================
+      - name: 📤 上传诊断日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghcr-diagnostic-logs
+          path: |
+            login.log
+            build.log
+            push.log
+          retention-days: 7
+
+      # ===========================
+      # 14. 最终诊断报告
+      # ===========================
+      - name: 📋 生成诊断报告
+        if: always()
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🎯 下一步操作建议" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.push.outputs.push_success }}" != "true" ]; then
+            echo "### ❌ 推送失败，请检查：" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "1. **仓库权限设置**" >> $GITHUB_STEP_SUMMARY
+            echo "   - 访问 https://github.com/${{ github.repository }}/settings/actions" >> $GITHUB_STEP_SUMMARY
+            echo "   - 确保选择了 \`Read and write permissions\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "2. **检查 Workflow 权限**" >> $GITHUB_STEP_SUMMARY
+            echo "   - 确认 workflow 文件中有 \`packages: write\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "3. **如果 Package 已存在**" >> $GITHUB_STEP_SUMMARY
+            echo "   - 访问 https://github.com/users/${{ github.repository_owner }}/packages/container/bot/settings" >> $GITHUB_STEP_SUMMARY
+            echo "   - 在 \`Manage Actions access\` 中添加仓库并授予 Write 权限" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "4. **考虑使用 PAT**" >> $GITHUB_STEP_SUMMARY
+            echo "   - 创建 https://github.com/settings/tokens/new" >> $GITHUB_STEP_SUMMARY
+            echo "   - 勾选 \`write:packages\` 权限" >> $GITHUB_STEP_SUMMARY
+            echo "   - 添加到 https://github.com/${{ github.repository }}/settings/secrets/actions" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ✅ 所有测试通过！" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "可以安全使用原始 workflow 进行推送。" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📥 详细日志已保存到 Artifacts，下载查看完整错误信息。" >> $GITHUB_STEP_SUMMARY
