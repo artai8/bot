@@ -1,14 +1,12 @@
 pyrogram==2.0.106
 tgcrypto
 pyromod
-pymongo
 motor
-umongo
+umongo[motor]
 dnspython
-marshmallow
 pytz
 requests
-bs4
+beautifulsoup4
 shortzy
 aiohttp
 aiofiles
