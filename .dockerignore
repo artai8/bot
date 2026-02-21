@@ -1,15 +1,11 @@
-# ===========================
-# Git 相关
-# ===========================
+# Git
 .git
 .gitignore
 .gitattributes
 .github
 
-# ===========================
-# Python 缓存
-# ===========================
-__pycache__
+# Python 缓存 & 构建产物
+__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -19,36 +15,30 @@ __pycache__
 dist/
 build/
 *.whl
+pip-log.txt
 
-# ===========================
 # 虚拟环境
-# ===========================
 venv/
 env/
+.venv/
 ENV/
-.venv
 
-# ===========================
-# 环境变量和配置
-# ===========================
+# 环境变量（防止密钥泄露）
 .env
 .env.*
 *.env
 .envrc
 
-# ===========================
-# IDE 配置
-# ===========================
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *.swn
 .DS_Store
+Thumbs.db
 
-# ===========================
-# 日志和数据库
-# ===========================
+# 日志 & 本地数据
 *.log
 *.db
 *.sqlite
@@ -56,34 +46,29 @@ ENV/
 logs/
 data/
 
-# ===========================
-# 测试相关
-# ===========================
+# 测试
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
-*.cover
 
-# ===========================
 # 文档
-# ===========================
 README.md
 LICENSE
 *.md
 docs/
+CHANGELOG*
 
-# ===========================
-# Docker 相关
-# ===========================
+# Docker 自身（避免递归）
 Dockerfile*
 docker-compose*.yml
+docker-compose*.yaml
 .dockerignore
 
-# ===========================
 # 临时文件
-# ===========================
 *.tmp
 *.bak
 *.orig
 .cache/
+*.session
+*.session-journal
