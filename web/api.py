@@ -410,7 +410,7 @@ async def api_share_forward(request):
         keywords = share.get('keywords', [])
         suffix = ""
         if keywords:
-            suffix = f"在评论区回复（{','.join(keywords)}）获取内容"
+            suffix = f"\n\n<blockquote>在评论区回复 {keywords[0]} 获取内容</blockquote>"
         group_text = share.get('group_text', '') or ''
         caption = group_text
         if suffix:
@@ -810,3 +810,4 @@ def setup_api_routes(app):
         logger.error(f"Cannot serve static files: {STATIC_DIR} not found")
 
     logger.info("=== API routes setup complete ===")
+
