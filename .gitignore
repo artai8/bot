@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+*.log
+*.txt
+!requirements.txt
+.vscode/
+.idea/
+*.session
+*.session-journal
+backup_*.json
+.DS_Store
+Thumbs.db
+docker-compose.override.yml
