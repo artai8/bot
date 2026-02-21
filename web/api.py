@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import asyncio
+import html
 from aiohttp import web
 from functools import wraps
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
@@ -410,7 +411,8 @@ async def api_share_forward(request):
         keywords = share.get('keywords', [])
         suffix = ""
         if keywords:
-            suffix = f"\n\n<blockquote>在评论区回复 {keywords[0]} 获取内容</blockquote>"
+            kw = html.escape(str(keywords[0]))
+            suffix = f"\n\n<blockquote>在评论区回复 <code>（{kw}）</code> 获取内容</blockquote>"
         group_text = share.get('group_text', '') or ''
         caption = group_text
         if suffix:
