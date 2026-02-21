@@ -104,6 +104,17 @@ def _normalize_channel_list(raw):
     return clean
 
 
+def _escape_mdv2(text):
+    """转义 MarkdownV2 特殊字符（反引号内的内容不需要转义）"""
+    special = r'_*[]()~`>#+-=|{}.!'
+    result = []
+    for ch in text:
+        if ch in special:
+            result.append('\\')
+        result.append(ch)
+    return ''.join(result)
+
+
 # ============ 认证装饰器 ============
 def require_auth(handler):
     async def wrapper(request):
@@ -408,14 +419,18 @@ async def api_share_forward(request):
         if not msgs:
             return web.json_response({'error': 'Messages not found'}, status=404)
 
-        # ===== 构建 caption =====
+        # ===== 构建 caption（MarkdownV2） =====
         keywords = share.get('keywords', [])
         suffix = ""
         if keywords:
-            kw = html.escape(str(keywords[0]))
-            suffix = f"\n\n<code>在评论区输入（{kw}）查看资源</code>"
+            kw = str(keywords[0])
+            suffix = f"\n\n`在评论区输入（{kw}）查看资源`"
         group_text = share.get('group_text', '') or ''
-        caption = group_text
+        if group_text:
+            escaped_group_text = _escape_mdv2(group_text)
+        else:
+            escaped_group_text = ''
+        caption = escaped_group_text
         if suffix:
             caption = f"{caption}{suffix}" if caption else suffix
 
@@ -428,9 +443,8 @@ async def api_share_forward(request):
                 if can_album:
                     media = []
                     for i, m in enumerate(msgs):
-                        # 只有第一条带 caption，其余传 None
                         cap = caption if i == 0 else None
-                        pm = ParseMode.HTML if i == 0 else None
+                        pm = ParseMode.MARKDOWN if i == 0 else None
                         if m.photo:
                             media.append(InputMediaPhoto(
                                 m.photo.file_id,
@@ -447,23 +461,21 @@ async def api_share_forward(request):
                 else:
                     for i, msg in enumerate(msgs):
                         if msg.text and not msg.media:
-                            # 纯文本消息
-                            text = caption if (i == 0 and caption) else msg.text
+                            text = caption if (i == 0 and caption) else _escape_mdv2(msg.text)
                             await BOT_INSTANCE.send_message(
                                 chat_id=channel_id,
                                 text=text,
-                                parse_mode=ParseMode.HTML
+                                parse_mode=ParseMode.MARKDOWN
                             )
                         else:
-                            # 媒体消息
                             if i == 0 and caption:
                                 cap = caption
                             else:
-                                cap = msg.caption or ""
+                                cap = _escape_mdv2(msg.caption) if msg.caption else ""
                             await msg.copy(
                                 chat_id=channel_id,
                                 caption=cap,
-                                parse_mode=ParseMode.HTML
+                                parse_mode=ParseMode.MARKDOWN
                             )
                         await asyncio.sleep(0.4)
                 successful += 1
