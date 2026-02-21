@@ -408,6 +408,7 @@ async def api_share_forward(request):
         if not msgs:
             return web.json_response({'error': 'Messages not found'}, status=404)
 
+        # ===== 构建 caption =====
         keywords = share.get('keywords', [])
         suffix = ""
         if keywords:
@@ -416,7 +417,7 @@ async def api_share_forward(request):
         group_text = share.get('group_text', '') or ''
         caption = group_text
         if suffix:
-            caption = f"{caption}\n\n{suffix}" if caption else suffix
+            caption = f"{caption}{suffix}" if caption else suffix
 
         can_album = len(msgs) > 1 and all((m.photo or m.video) and not m.document for m in msgs)
         successful = 0
@@ -427,26 +428,50 @@ async def api_share_forward(request):
                 if can_album:
                     media = []
                     for i, m in enumerate(msgs):
-                        cap = caption if i == 0 else ""
+                        # 只有第一条带 caption，其余传 None
+                        cap = caption if i == 0 else None
+                        pm = ParseMode.HTML if i == 0 else None
                         if m.photo:
-                            media.append(InputMediaPhoto(m.photo.file_id, caption=cap, parse_mode=ParseMode.HTML))
+                            media.append(InputMediaPhoto(
+                                m.photo.file_id,
+                                caption=cap,
+                                parse_mode=pm
+                            ))
                         elif m.video:
-                            media.append(InputMediaVideo(m.video.file_id, caption=cap, parse_mode=ParseMode.HTML))
+                            media.append(InputMediaVideo(
+                                m.video.file_id,
+                                caption=cap,
+                                parse_mode=pm
+                            ))
                     await BOT_INSTANCE.send_media_group(chat_id=channel_id, media=media)
                 else:
                     for i, msg in enumerate(msgs):
                         if msg.text and not msg.media:
-                            text = caption if i == 0 else msg.text
-                            await BOT_INSTANCE.send_message(chat_id=channel_id, text=text, parse_mode=ParseMode.HTML)
+                            # 纯文本消息
+                            text = caption if (i == 0 and caption) else msg.text
+                            await BOT_INSTANCE.send_message(
+                                chat_id=channel_id,
+                                text=text,
+                                parse_mode=ParseMode.HTML
+                            )
                         else:
-                            cap = caption if i == 0 else ""
-                            await msg.copy(chat_id=channel_id, caption=cap, parse_mode=ParseMode.HTML)
+                            # 媒体消息
+                            if i == 0 and caption:
+                                cap = caption
+                            else:
+                                cap = msg.caption or ""
+                            await msg.copy(
+                                chat_id=channel_id,
+                                caption=cap,
+                                parse_mode=ParseMode.HTML
+                            )
                         await asyncio.sleep(0.4)
                 successful += 1
             except FloodWait as e:
                 await asyncio.sleep(e.value)
                 failed += 1
-            except Exception:
+            except Exception as ex:
+                logger.error(f"Forward to {channel_id} failed: {ex}")
                 failed += 1
 
         return web.json_response({'success': True, 'successful': successful, 'failed': failed})
@@ -812,4 +837,3 @@ def setup_api_routes(app):
         logger.error(f"Cannot serve static files: {STATIC_DIR} not found")
 
     logger.info("=== API routes setup complete ===")
-
