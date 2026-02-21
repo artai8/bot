@@ -412,9 +412,11 @@ async def api_share_forward(request):
         suffix = ""
         if keywords:
             kw = html.escape(str(keywords[0]))
-            # 使用 Markdown 反引号包裹整句以确保胶囊高亮
-            suffix = f"\n`在评论区输入（{kw}）查看资源`"
-        group_text = share.get('group_text', '') or ''
+            # 使用 Blockquote + Bold + Code 组合实现带竖线的胶囊样式
+            suffix = f"\n<blockquote><b><code>在评论区输入（{kw}）查看资源</code></b></blockquote>"
+        
+        # 必须对 group_text 进行 HTML 转义，否则特殊字符会导致 parse_mode 失效或报错
+        group_text = html.escape(share.get('group_text', '') or '')
         caption = group_text
         if suffix:
             caption = f"{caption}\n{suffix}" if caption else suffix
@@ -430,18 +432,18 @@ async def api_share_forward(request):
                     for i, m in enumerate(msgs):
                         cap = caption if i == 0 else ""
                         if m.photo:
-                            media.append(InputMediaPhoto(m.photo.file_id, caption=cap, parse_mode=ParseMode.MARKDOWN))
+                            media.append(InputMediaPhoto(m.photo.file_id, caption=cap, parse_mode=ParseMode.HTML))
                         elif m.video:
-                            media.append(InputMediaVideo(m.video.file_id, caption=cap, parse_mode=ParseMode.MARKDOWN))
+                            media.append(InputMediaVideo(m.video.file_id, caption=cap, parse_mode=ParseMode.HTML))
                     await BOT_INSTANCE.send_media_group(chat_id=channel_id, media=media)
                 else:
                     for i, msg in enumerate(msgs):
                         if msg.text and not msg.media:
                             text = caption if i == 0 else msg.text
-                            await BOT_INSTANCE.send_message(chat_id=channel_id, text=text, parse_mode=ParseMode.MARKDOWN)
+                            await BOT_INSTANCE.send_message(chat_id=channel_id, text=text, parse_mode=ParseMode.HTML)
                         else:
                             cap = caption if i == 0 else ""
-                            await msg.copy(chat_id=channel_id, caption=cap, parse_mode=ParseMode.MARKDOWN)
+                            await msg.copy(chat_id=channel_id, caption=cap, parse_mode=ParseMode.HTML)
                         await asyncio.sleep(0.4)
                 successful += 1
             except FloodWait as e:
