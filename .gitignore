@@ -1,74 +1,17 @@
-# Git
-.git
-.gitignore
-.gitattributes
-.github
-
-# Python 缓存 & 构建产物
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-*.egg
 *.egg-info/
 dist/
 build/
-*.whl
-pip-log.txt
-
-# 虚拟环境
-venv/
-env/
-.venv/
-ENV/
-
-# 环境变量（防止密钥泄露）
 .env
-.env.*
-*.env
-.envrc
-
-# IDE
+*.log
+*.txt
+!requirements.txt
 .vscode/
 .idea/
-*.swp
-*.swo
-*.swn
-.DS_Store
-Thumbs.db
-
-# 日志 & 本地数据
-*.log
-*.db
-*.sqlite
-*.sqlite3
-logs/
-data/
-
-# 测试
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-
-# 文档
-README.md
-LICENSE
-*.md
-docs/
-CHANGELOG*
-
-# Docker 自身（避免递归）
-Dockerfile*
-docker-compose*.yml
-docker-compose*.yaml
-.dockerignore
-
-# 临时文件
-*.tmp
-*.bak
-*.orig
-.cache/
 *.session
 *.session-journal
+backup_*.json
+.DS_Store
+Thumbs.db
+docker-compose.override.yml
