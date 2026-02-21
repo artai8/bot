@@ -104,17 +104,6 @@ def _normalize_channel_list(raw):
     return clean
 
 
-def _escape_mdv2(text):
-    """转义 MarkdownV2 特殊字符（反引号内的内容不需要转义）"""
-    special = r'_*[]()~`>#+-=|{}.!'
-    result = []
-    for ch in text:
-        if ch in special:
-            result.append('\\')
-        result.append(ch)
-    return ''.join(result)
-
-
 # ============ 认证装饰器 ============
 def require_auth(handler):
     async def wrapper(request):
@@ -419,20 +408,15 @@ async def api_share_forward(request):
         if not msgs:
             return web.json_response({'error': 'Messages not found'}, status=404)
 
-        # ===== 构建 caption（MarkdownV2） =====
         keywords = share.get('keywords', [])
         suffix = ""
         if keywords:
-            kw = str(keywords[0])
-            suffix = f"\n\n`在评论区输入（{kw}）查看资源`"
+            kw = html.escape(str(keywords[0]))
+            suffix = f"\n\n<blockquote>在评论区输入（{kw}）查看资源</blockquote>"
         group_text = share.get('group_text', '') or ''
-        if group_text:
-            escaped_group_text = _escape_mdv2(group_text)
-        else:
-            escaped_group_text = ''
-        caption = escaped_group_text
+        caption = group_text
         if suffix:
-            caption = f"{caption}{suffix}" if caption else suffix
+            caption = f"{caption}\n\n{suffix}" if caption else suffix
 
         can_album = len(msgs) > 1 and all((m.photo or m.video) and not m.document for m in msgs)
         successful = 0
@@ -443,47 +427,26 @@ async def api_share_forward(request):
                 if can_album:
                     media = []
                     for i, m in enumerate(msgs):
-                        cap = caption if i == 0 else None
-                        pm = ParseMode.MARKDOWN if i == 0 else None
+                        cap = caption if i == 0 else ""
                         if m.photo:
-                            media.append(InputMediaPhoto(
-                                m.photo.file_id,
-                                caption=cap,
-                                parse_mode=pm
-                            ))
+                            media.append(InputMediaPhoto(m.photo.file_id, caption=cap, parse_mode=ParseMode.HTML))
                         elif m.video:
-                            media.append(InputMediaVideo(
-                                m.video.file_id,
-                                caption=cap,
-                                parse_mode=pm
-                            ))
+                            media.append(InputMediaVideo(m.video.file_id, caption=cap, parse_mode=ParseMode.HTML))
                     await BOT_INSTANCE.send_media_group(chat_id=channel_id, media=media)
                 else:
                     for i, msg in enumerate(msgs):
                         if msg.text and not msg.media:
-                            text = caption if (i == 0 and caption) else _escape_mdv2(msg.text)
-                            await BOT_INSTANCE.send_message(
-                                chat_id=channel_id,
-                                text=text,
-                                parse_mode=ParseMode.MARKDOWN
-                            )
+                            text = caption if i == 0 else msg.text
+                            await BOT_INSTANCE.send_message(chat_id=channel_id, text=text, parse_mode=ParseMode.HTML)
                         else:
-                            if i == 0 and caption:
-                                cap = caption
-                            else:
-                                cap = _escape_mdv2(msg.caption) if msg.caption else ""
-                            await msg.copy(
-                                chat_id=channel_id,
-                                caption=cap,
-                                parse_mode=ParseMode.MARKDOWN
-                            )
+                            cap = caption if i == 0 else ""
+                            await msg.copy(chat_id=channel_id, caption=cap, parse_mode=ParseMode.HTML)
                         await asyncio.sleep(0.4)
                 successful += 1
             except FloodWait as e:
                 await asyncio.sleep(e.value)
                 failed += 1
-            except Exception as ex:
-                logger.error(f"Forward to {channel_id} failed: {ex}")
+            except Exception:
                 failed += 1
 
         return web.json_response({'success': True, 'successful': successful, 'failed': failed})
@@ -849,3 +812,4 @@ def setup_api_routes(app):
         logger.error(f"Cannot serve static files: {STATIC_DIR} not found")
 
     logger.info("=== API routes setup complete ===")
+
