@@ -9,7 +9,7 @@ from database.database import (
     create_share, get_share, update_share, delete_share,
     get_user_shares, increment_stat
 )
-from plugins.share import user_share_sessions
+from plugins.share import user_share_sessions, send_share_page, build_share_page_buttons
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,32 @@ async def share_callback_handler(client: Client, query: CallbackQuery):
         await query.message.edit_text("❌ 分享已取消。")
 
     # ========== 分享管理回调 ==========
+    elif data.startswith("share_page_"):
+        parts = data.split("_", 3)
+        if len(parts) < 4:
+            return await query.answer("❌ 参数错误", show_alert=True)
+        code = parts[2]
+        try:
+            page = int(parts[3])
+        except Exception:
+            page = 1
+
+        share = await get_share(code)
+        if not share:
+            return await query.answer("❌ 分享不存在！", show_alert=True)
+
+        snt_msgs, page, total_pages = await send_share_page(
+            client, query.from_user.id, share, page=page, per_page=10
+        )
+        if not snt_msgs:
+            return await query.answer("❌ 无可发送的文件。", show_alert=True)
+
+        await query.message.edit_text(
+            f"📄 第 {page}/{total_pages} 页",
+            reply_markup=build_share_page_buttons(code, page, total_pages)
+        )
+        await query.answer()
+
     elif data.startswith("share_detail_"):
         code = data.replace("share_detail_", "")
         share = await get_share(code)
