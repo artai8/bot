@@ -5,7 +5,7 @@ from logging.handlers import RotatingFileHandler
 
 # ============ 基础配置 ============
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
-APP_ID = int(os.environ.get("APP_ID", "0"))
+API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "0"))
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
