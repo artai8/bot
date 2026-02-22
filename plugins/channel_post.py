@@ -12,7 +12,8 @@ import config as cfg
 from helper_func import generate_share_code, ALL_COMMANDS
 from database.database import (
     create_share, get_share, increment_stat,
-    find_share_by_message_id, find_shares_by_keyword
+    find_share_by_message_id, find_shares_by_keyword,
+    find_share_by_group_text, update_share
 )
 from plugins.share import user_share_sessions
 
@@ -160,6 +161,74 @@ async def _finalize_channel_media_group(client: Client, group_id: str):
         elif msg.text:
             group_text = msg.text
             break
+
+    group_text = (group_text or "").strip()
+    if group_text:
+        existing_share = await find_share_by_group_text(
+            group_text, owner_id=client.db_channel.id
+        )
+    else:
+        existing_share = None
+
+    if existing_share:
+        existing_ids = existing_share.get("message_ids", [])
+        merged_ids = existing_ids[:]
+        for mid in message_ids:
+            if mid not in existing_ids:
+                merged_ids.append(mid)
+
+        updates = {}
+        if merged_ids != existing_ids:
+            updates["message_ids"] = merged_ids
+        if not existing_share.get("keywords"):
+            updates["keywords"] = _generate_keywords(group_text)
+
+        if updates:
+            await update_share(existing_share["_id"], updates)
+
+        share_code = existing_share["_id"]
+        share_link = f"https://t.me/{client.username}?start={share_code}"
+        reply_markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(
+                "🔁 分享链接",
+                url=f"https://telegram.me/share/url?url={share_link}"
+            )]]
+        )
+
+        edited_any = False
+        if not cfg.DISABLE_CHANNEL_BUTTON:
+            try:
+                await messages[0].edit_reply_markup(reply_markup)
+                edited_any = True
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                try:
+                    await messages[0].edit_reply_markup(reply_markup)
+                    edited_any = True
+                except Exception as ex:
+                    logger.warning(f"Failed to edit media group message after flood wait: {ex}")
+            except Exception as ex:
+                logger.warning(f"Failed to edit media group message: {ex}")
+
+        if not edited_any:
+            try:
+                await client.send_message(
+                    chat_id=cfg.CHANNEL_ID,
+                    text=(
+                        f"✅ 分享链接：{share_link}\n"
+                        f"分享码：<code>{share_code}</code>"
+                    ),
+                    reply_to_message_id=messages[0].id,
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("🔗 打开链接", url=share_link)]]
+                    ),
+                    disable_web_page_preview=True
+                )
+            except Exception as ex:
+                logger.error(f"Failed to send share link for media group: {ex}")
+
+        logger.info(f"Media group merged into share: {share_code} with {len(message_ids)} files")
+        return
 
     keywords = _generate_keywords(group_text)
 
