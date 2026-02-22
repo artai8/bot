@@ -128,22 +128,22 @@ async def handle_share_code(client: Client, message: Message, code: str):
         await message.reply("❌ 此分享没有包含任何文件。", quote=True)
         return True
 
-    try:
-        msgs = await get_messages(client, message_ids)
-    except Exception as e:
-        logger.error(f"Error getting share messages: {e}")
-        await message.reply("❌ 获取文件时出错，请稍后再试。", quote=True)
-        return True
-
-    # 过滤掉空消息
-    msgs = [m for m in msgs if m and not m.empty]
-    if not msgs:
-        await message.reply("❌ 文件已不存在或已被删除。", quote=True)
-        return True
-
     group_text = share.get('group_text', '')
     if not group_text:
-        for m in msgs:
+        page_ids = message_ids[:10]
+        try:
+            page_msgs = await get_messages(client, page_ids)
+        except Exception as e:
+            logger.error(f"Error getting share messages: {e}")
+            await message.reply("❌ 获取文件时出错，请稍后再试。", quote=True)
+            return True
+
+        page_msgs = [m for m in page_msgs if m and not m.empty]
+        if not page_msgs:
+            await message.reply("❌ 文件已不存在或已被删除。", quote=True)
+            return True
+
+        for m in page_msgs:
             if m.caption:
                 group_text = m.caption
                 break
@@ -156,93 +156,27 @@ async def handle_share_code(client: Client, message: Message, code: str):
         header += f"\n📝 媒体组文字：{group_text}"
     await message.reply(header, quote=True)
 
-    snt_msgs = []
+    snt_msgs, page, total_pages = await send_share_page(
+        client, message.from_user.id, share, page=1, per_page=10
+    )
+    nav_message = None
+    if total_pages > 1:
+        nav_message = await message.reply(
+            f"📄 第 {page}/{total_pages} 页",
+            reply_markup=build_share_page_buttons(code, page, total_pages),
+            quote=True
+        )
 
-    # 尝试以媒体组方式发送
-    can_album = len(msgs) > 1 and all((m.photo or m.video) and not m.document for m in msgs)
-    if can_album:
-        media = []
-        for i, m in enumerate(msgs):
-            caption = None
-            if i == 0:
-                caption = m.caption.html if m.caption else ""
-                if SHOW_PROMO and PROMO_TEXT:
-                    caption = (caption or "") + PROMO_TEXT
-
-            if m.photo:
-                media.append(InputMediaPhoto(m.photo.file_id, caption=caption, parse_mode=ParseMode.HTML))
-            elif m.video:
-                media.append(InputMediaVideo(m.video.file_id, caption=caption, parse_mode=ParseMode.HTML))
-
-        try:
-            snt_msgs = await client.send_media_group(
-                chat_id=message.from_user.id,
-                media=media,
-                protect_content=protect
-            )
-        except TypeError:
-            try:
-                snt_msgs = await client.send_media_group(
-                    chat_id=message.from_user.id,
-                    media=media
-                )
-            except Exception as e:
-                logger.error(f"Error sending media group (fallback): {e}")
-                snt_msgs = []
-        except Exception as e:
-            logger.error(f"Error sending media group: {e}")
-            snt_msgs = []
-
-    # 逐条发送（非媒体组或媒体组发送失败时）
-    if not snt_msgs:
-        for msg in msgs:
-            if bool(CUSTOM_CAPTION) and bool(msg.document):
-                caption = CUSTOM_CAPTION.format(
-                    previouscaption="" if not msg.caption else msg.caption.html,
-                    filename=msg.document.file_name
-                )
-            else:
-                caption = "" if not msg.caption else msg.caption.html
-
-            if SHOW_PROMO and PROMO_TEXT:
-                caption += PROMO_TEXT
-
-            reply_markup = msg.reply_markup if DISABLE_CHANNEL_BUTTON else None
-
-            try:
-                snt_msg = await msg.copy(
-                    chat_id=message.from_user.id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                    protect_content=protect
-                )
-                snt_msgs.append(snt_msg)
-                await asyncio.sleep(0.5)
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-                try:
-                    snt_msg = await msg.copy(
-                        chat_id=message.from_user.id,
-                        caption=caption,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=reply_markup,
-                        protect_content=protect
-                    )
-                    snt_msgs.append(snt_msg)
-                except Exception as e2:
-                    logger.error(f"Error copying after flood wait: {e2}")
-            except Exception as e:
-                logger.error(f"Error copying share message: {e}")
-
-    # 自动删除
     if AUTO_DELETE_TIME > 0 and snt_msgs:
         time_str = get_exp_time(AUTO_DELETE_TIME)
         notification = await message.reply(
             AUTO_DELETE_MSG.format(time=time_str), quote=True
         )
+        delete_targets = snt_msgs[:]
+        if nav_message:
+            delete_targets.append(nav_message)
         asyncio.get_event_loop().create_task(
-            _auto_delete(snt_msgs, notification, AUTO_DELETE_TIME)
+            _auto_delete(delete_targets, notification, AUTO_DELETE_TIME)
         )
 
     await increment_stat('files_shared', len(snt_msgs))
@@ -260,3 +194,119 @@ async def _auto_delete(messages, notification, delay):
         await notification.delete()
     except Exception:
         pass
+
+
+def build_share_page_buttons(code: str, page: int, total_pages: int):
+    buttons = []
+    if page > 1:
+        buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"share_page_{code}_{page - 1}"))
+    if page < total_pages:
+        buttons.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"share_page_{code}_{page + 1}"))
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup([buttons])
+
+
+async def send_share_page(client: Client, chat_id: int, share: dict, page: int, per_page: int = 10):
+    message_ids = share.get('message_ids', [])
+    if not message_ids:
+        return [], 1, 0
+
+    total_pages = (len(message_ids) + per_page - 1) // per_page
+    if total_pages <= 0:
+        return [], 1, 0
+
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * per_page
+    end = start + per_page
+    selected_ids = message_ids[start:end]
+
+    try:
+        msgs = await get_messages(client, selected_ids)
+    except Exception as e:
+        logger.error(f"Error getting share messages: {e}")
+        return [], page, total_pages
+
+    msgs = [m for m in msgs if m and not m.empty]
+    if not msgs:
+        return [], page, total_pages
+
+    protect = share.get('protect_content', PROTECT_CONTENT)
+    snt_msgs = []
+
+    can_album = len(msgs) > 1 and all((m.photo or m.video) and not m.document for m in msgs)
+    if can_album:
+        media = []
+        for i, m in enumerate(msgs):
+            caption = None
+            if i == 0:
+                caption = m.caption.html if m.caption else ""
+                if SHOW_PROMO and PROMO_TEXT:
+                    caption = (caption or "") + PROMO_TEXT
+
+            if m.photo:
+                media.append(InputMediaPhoto(m.photo.file_id, caption=caption, parse_mode=ParseMode.HTML))
+            elif m.video:
+                media.append(InputMediaVideo(m.video.file_id, caption=caption, parse_mode=ParseMode.HTML))
+
+        try:
+            snt_msgs = await client.send_media_group(
+                chat_id=chat_id,
+                media=media,
+                protect_content=protect
+            )
+        except TypeError:
+            try:
+                snt_msgs = await client.send_media_group(
+                    chat_id=chat_id,
+                    media=media
+                )
+            except Exception as e:
+                logger.error(f"Error sending media group (fallback): {e}")
+                snt_msgs = []
+        except Exception as e:
+            logger.error(f"Error sending media group: {e}")
+            snt_msgs = []
+
+    if not snt_msgs:
+        for msg in msgs:
+            if bool(CUSTOM_CAPTION) and bool(msg.document):
+                caption = CUSTOM_CAPTION.format(
+                    previouscaption="" if not msg.caption else msg.caption.html,
+                    filename=msg.document.file_name
+                )
+            else:
+                caption = "" if not msg.caption else msg.caption.html
+
+            if SHOW_PROMO and PROMO_TEXT:
+                caption += PROMO_TEXT
+
+            reply_markup = msg.reply_markup if DISABLE_CHANNEL_BUTTON else None
+
+            try:
+                snt_msg = await msg.copy(
+                    chat_id=chat_id,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                    protect_content=protect
+                )
+                snt_msgs.append(snt_msg)
+                await asyncio.sleep(0.5)
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                try:
+                    snt_msg = await msg.copy(
+                        chat_id=chat_id,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup,
+                        protect_content=protect
+                    )
+                    snt_msgs.append(snt_msg)
+                except Exception as e2:
+                    logger.error(f"Error copying after flood wait: {e2}")
+            except Exception as e:
+                logger.error(f"Error copying share message: {e}")
+
+    return snt_msgs, page, total_pages
