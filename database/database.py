@@ -116,6 +116,12 @@ async def get_share(share_code: str):
 async def find_share_by_message_id(message_id: int):
     return await shares_collection.find_one({'message_ids': message_id})
 
+async def find_share_by_group_text(group_text: str, owner_id: int = None):
+    query = {'group_text': group_text}
+    if owner_id is not None:
+        query['owner_id'] = owner_id
+    return await shares_collection.find_one(query)
+
 async def find_share_by_keyword(keyword: str):
     cursor = shares_collection.find({'keywords': keyword}).sort('created_at', -1).limit(1)
     docs = [doc async for doc in cursor]
