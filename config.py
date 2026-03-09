@@ -9,7 +9,7 @@ API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "0"))
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
-PORT = os.environ.get("PORT", "8585")
+PORT = os.environ.get("PORT", "7860")
 RUN_BOT = os.environ.get("RUN_BOT", "True").lower() == "true"
 
 # ============ 数据库 ============
