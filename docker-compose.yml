@@ -6,13 +6,13 @@ services:
     container_name: dehua-share-bot
     restart: unless-stopped
     ports:
-      - "8585:8585"
+      - "${PORT:-7860}:${PORT:-7860}"
     env_file: .env
     depends_on:
       mongo:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8585/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost:${PORT:-7860}/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
