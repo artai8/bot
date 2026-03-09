@@ -1,3 +1,4 @@
+import os
 import time
 from aiohttp import web
 from datetime import datetime
@@ -8,6 +9,11 @@ start_time = time.time()
 
 @routes.get("/", allow_head=True)
 async def root_route_handler(request):
+    from web.api import INDEX_FILE
+
+    if INDEX_FILE and os.path.isfile(INDEX_FILE):
+        return web.FileResponse(INDEX_FILE)
+
     return web.json_response({
         "status": "alive",
         "bot": "dehua-share-bot",
