@@ -66,10 +66,10 @@ COPY --chown=appuser:appuser *.py ./
 
 USER appuser
 
-EXPOSE 8585
+EXPOSE 7860
 
 # 健康检查（拉长间隔减少 CPU 开销，-sf 静默 + 失败返回错误码）
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 --start-period=45s \
-    CMD curl -sf http://localhost:8585/health || exit 1
+    CMD sh -c 'curl -sf "http://localhost:${PORT:-7860}/health" || exit 1'
 
 CMD ["python3", "main.py"]
