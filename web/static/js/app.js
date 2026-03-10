@@ -366,11 +366,14 @@ async function doForward(code) {
     const keywords = document.getElementById('kw-' + code)?.value || '';
     const group_text = document.getElementById('gt-' + code)?.value || '';
     const selection = getFwdSelection(code);
+    const body = { ...selection };
+    if (keywords) body.keywords = keywords;
+    if (group_text) body.group_text = group_text;
     const btn = document.getElementById('fwd-btn-' + code);
     if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i>'; }
     const r = await api(`/api/shares/${code}/forward`, {
         method: 'POST',
-        body: JSON.stringify({ keywords, group_text, ...selection })
+        body: JSON.stringify(body)
     });
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Fwd'; }
     if (r && r.success) toast(`Forwarded → ${r.successful} ch`, 'success');

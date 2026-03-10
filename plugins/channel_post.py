@@ -3,6 +3,7 @@ import logging
 import random
 import re
 import string
+import time as _time
 from pyrogram import filters, Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
@@ -19,6 +20,11 @@ from plugins.share import user_share_sessions
 
 logger = logging.getLogger(__name__)
 channel_media_groups = {}
+
+# ============ 关联频道缓存 ============
+_linked_chat_cache = {}   # group_id -> linked_channel_id | None
+_linked_cache_ts = {}     # group_id -> timestamp
+_LINKED_CACHE_TTL = 600   # 缓存10分钟
 
 _NON_WORD_RE = re.compile(r"[\s\W_]+", re.UNICODE)
 
@@ -49,6 +55,37 @@ def _get_bound_ids():
     return set(channels)
 
 
+async def _get_linked_channel_id(client, chat_id):
+    """获取群组关联的频道 ID，带缓存避免频繁 API 调用触发 FloodWait"""
+    now = _time.time()
+    if chat_id in _linked_chat_cache and now - _linked_cache_ts.get(chat_id, 0) < _LINKED_CACHE_TTL:
+        return _linked_chat_cache[chat_id]
+
+    try:
+        chat = await client.get_chat(chat_id)
+        linked = getattr(chat, "linked_chat", None)
+        linked_id = linked.id if linked else None
+        _linked_chat_cache[chat_id] = linked_id
+        _linked_cache_ts[chat_id] = now
+        return linked_id
+    except FloodWait as e:
+        logger.warning(f"FloodWait getting chat {chat_id}: waiting {e.value}s")
+        await asyncio.sleep(e.value)
+        try:
+            chat = await client.get_chat(chat_id)
+            linked = getattr(chat, "linked_chat", None)
+            linked_id = linked.id if linked else None
+            _linked_chat_cache[chat_id] = linked_id
+            _linked_cache_ts[chat_id] = now
+            return linked_id
+        except Exception as e2:
+            logger.error(f"Failed to get chat {chat_id} after FloodWait: {e2}")
+            return _linked_chat_cache.get(chat_id)
+    except Exception as e:
+        logger.error(f"Error getting chat {chat_id}: {e}")
+        return _linked_chat_cache.get(chat_id)
+
+
 # ============ 讨论组关键词回复 ============
 @Bot.on_message(
     filters.group & filters.incoming & filters.text,
@@ -64,13 +101,9 @@ async def discussion_keyword_reply(client: Client, message: Message):
     if not bound_ids:
         return
 
-    # 判断当前群是否是绑定频道的讨论组
-    try:
-        chat = await client.get_chat(message.chat.id)
-        linked = getattr(chat, "linked_chat", None)
-        if not linked or linked.id not in bound_ids:
-            return
-    except Exception:
+    # 使用缓存判断当前群是否是绑定频道的讨论组
+    linked_id = await _get_linked_channel_id(client, message.chat.id)
+    if not linked_id or linked_id not in bound_ids:
         return
 
     # 全局搜索关键词
@@ -87,12 +120,26 @@ async def discussion_keyword_reply(client: Client, message: Message):
         link = f"https://t.me/{bot_username}?start={code}"
         buttons.append([InlineKeyboardButton(f"{button_text} {i + 1}", url=link)])
 
-    await message.reply_text(
-        f"已获得\"{keyword}\"相关资源，共 {len(shares)} 条",
-        quote=True,
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-    logger.info(f"Keyword reply: '{keyword}' -> {len(shares)} results in chat {message.chat.id}")
+    try:
+        await message.reply_text(
+            f"已获得\"{keyword}\"相关资源，共 {len(shares)} 条",
+            quote=True,
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        logger.info(f"Keyword reply: '{keyword}' -> {len(shares)} results in chat {message.chat.id}")
+    except FloodWait as e:
+        logger.warning(f"FloodWait replying in chat {message.chat.id}: {e.value}s")
+        await asyncio.sleep(e.value)
+        try:
+            await message.reply_text(
+                f"已获得\"{keyword}\"相关资源，共 {len(shares)} 条",
+                quote=True,
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        except Exception as e2:
+            logger.error(f"Failed to reply after FloodWait: {e2}")
+    except Exception as e:
+        logger.error(f"Error sending keyword reply in chat {message.chat.id}: {e}")
 
 
 # ============ 管理员私聊文件收集 ============

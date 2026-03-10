@@ -244,6 +244,7 @@ async def create_indexes():
         await shares_collection.create_index('owner_id')
         await shares_collection.create_index('created_at')
         await shares_collection.create_index('message_ids')
+        await shares_collection.create_index('keywords')
         await shares_collection.create_index([('title', 'text')])
         logger.info("Database indexes created successfully")
     except Exception as e:
