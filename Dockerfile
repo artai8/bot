@@ -18,11 +18,6 @@ RUN pip install --no-cache-dir \
     --disable-pip-version-check \
     --no-warn-script-location \
     -r requirements.txt && \
-    pip install --no-cache-dir \
-    --prefix=/install \
-    --disable-pip-version-check \
-    --no-warn-script-location \
-    --no-deps pyromod && \
     # 清理安装包中不必要的文件，减小镜像体积
     find /install -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null; \
     find /install -type d -name "tests"       -exec rm -rf {} + 2>/dev/null; \

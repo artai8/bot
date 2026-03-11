@@ -3,7 +3,6 @@ import asyncio
 from aiohttp import web
 from plugins import web_server
 
-import pyromod.listen
 from pyrogram import Client
 from pyrogram.enums import ParseMode, ChatMemberStatus, ChatType
 from pyrogram.errors import FloodWait
