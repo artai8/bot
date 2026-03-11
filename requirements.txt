@@ -1,6 +1,5 @@
-pyrogram==2.0.106
+pyrofork==2.3.69
 tgcrypto
-pyromod
 motor
 umongo[motor]
 dnspython
