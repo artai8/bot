@@ -19,7 +19,7 @@ from pyrogram.errors import FloodWait
 from shortzy import Shortzy
 from database.database import (
     user_data, db_verify_status, db_update_verify_status,
-    is_banned as check_banned
+    is_banned as check_banned, update_force_sub_status
 )
 
 logger = logging.getLogger(__name__)
@@ -51,12 +51,24 @@ async def is_subscribed(filter, client, update):
                 ChatMemberStatus.ADMINISTRATOR,
                 ChatMemberStatus.MEMBER
             ]:
+                await update_force_sub_status(user_id, {
+                    'verified': False, 'verified_at': time.time(),
+                    'channels': [int(c) for c in channels]
+                })
                 return False
         except UserNotParticipant:
+            await update_force_sub_status(user_id, {
+                'verified': False, 'verified_at': time.time(),
+                'channels': [int(c) for c in channels]
+            })
             return False
         except Exception as e:
             logger.error(f"Error checking sub for channel {channel_id}: {e}")
             return False
+    await update_force_sub_status(user_id, {
+        'verified': True, 'verified_at': time.time(),
+        'channels': [int(c) for c in channels]
+    })
     return True
 
 
@@ -78,6 +90,72 @@ async def is_not_banned(filter, client, update):
             pass
         return False
     return True
+
+
+# ============ 强制关注提示（可复用） ============
+async def send_force_sub_prompt(client, message):
+    """向未加入强制频道的用户发送加入提示"""
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+    buttons = []
+
+    # 构建频道按钮
+    if hasattr(client, 'invitelinks') and client.invitelinks:
+        for idx, (channel_id, link) in enumerate(client.invitelinks.items(), 1):
+            if link and link.strip():
+                buttons.append([InlineKeyboardButton(f"📢 加入频道 {idx}", url=link)])
+    elif hasattr(client, 'invitelink') and client.invitelink:
+        if client.invitelink.strip():
+            buttons.append([InlineKeyboardButton("📢 加入频道", url=client.invitelink)])
+
+    if not buttons:
+        try:
+            channels = list(getattr(cfg, 'FORCE_SUB_CHANNELS', []) or [])
+            idx = 1
+            for channel_id in channels:
+                try:
+                    chat = await client.get_chat(channel_id)
+                    link = chat.invite_link
+                    if not link:
+                        await client.export_chat_invite_link(channel_id)
+                        link = (await client.get_chat(channel_id)).invite_link
+                    if link and link.strip():
+                        buttons.append([InlineKeyboardButton(f"📢 加入频道 {idx}", url=link)])
+                        idx += 1
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # 重试按钮（仅 /start 带参数时显示）
+    if hasattr(message, 'command') and len(message.command) > 1:
+        buttons.append([
+            InlineKeyboardButton(
+                text='🔄 重试',
+                url=f"https://t.me/{client.username}?start={message.command[1]}"
+            )
+        ])
+
+    if not buttons:
+        await message.reply(
+            text="⚠️ 管理员尚未配置强制加入的频道，请联系管理员。",
+            quote=True,
+            disable_web_page_preview=True
+        )
+        return
+
+    await message.reply(
+        text=cfg.FORCE_MSG.format(
+            first=message.from_user.first_name,
+            last=message.from_user.last_name,
+            username=None if not message.from_user.username else '@' + message.from_user.username,
+            mention=message.from_user.mention,
+            id=message.from_user.id
+        ),
+        reply_markup=InlineKeyboardMarkup(buttons),
+        quote=True,
+        disable_web_page_preview=True
+    )
 
 
 # ============ 编码解码 ============

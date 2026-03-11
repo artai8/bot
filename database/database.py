@@ -30,6 +30,12 @@ default_verify = {
     'link': ""
 }
 
+default_force_sub = {
+    'verified': False,
+    'verified_at': 0,
+    'channels': []
+}
+
 
 def new_user(id):
     return {
@@ -39,6 +45,11 @@ def new_user(id):
             'verified_time': "",
             'verify_token': "",
             'link': ""
+        },
+        'force_sub_status': {
+            'verified': False,
+            'verified_at': 0,
+            'channels': []
         },
         'joined_at': time.time()
     }
@@ -63,6 +74,20 @@ async def db_verify_status(user_id):
 
 async def db_update_verify_status(user_id, verify):
     await user_data.update_one({'_id': user_id}, {'$set': {'verify_status': verify}})
+
+
+async def get_force_sub_status(user_id: int):
+    user = await user_data.find_one({'_id': user_id})
+    if user:
+        return user.get('force_sub_status', default_force_sub)
+    return default_force_sub
+
+
+async def update_force_sub_status(user_id: int, status: dict):
+    await user_data.update_one(
+        {'_id': user_id},
+        {'$set': {'force_sub_status': status}}
+    )
 
 
 async def full_userbase():

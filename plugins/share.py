@@ -11,7 +11,7 @@ from config import (
     DISABLE_CHANNEL_BUTTON, PROMO_TEXT, SHOW_PROMO,
     AUTO_DELETE_TIME, AUTO_DELETE_MSG
 )
-from helper_func import not_banned, generate_share_code, get_messages, get_exp_time
+from helper_func import not_banned, generate_share_code, get_messages, get_exp_time, subscribed
 from database.database import (
     create_share, get_share, increment_share_access,
     get_user_shares, update_share, delete_share,
@@ -64,7 +64,7 @@ async def set_share_title(client: Client, message: Message):
     await message.reply(f"📝 标题已设置为：<b>{title}</b>", quote=True)
 
 
-@Bot.on_message(filters.command('myshares') & filters.private & not_banned, group=2)
+@Bot.on_message(filters.command('myshares') & filters.private & subscribed & not_banned, group=2)
 async def my_shares(client: Client, message: Message):
     """查看我的分享列表"""
     user_id = message.from_user.id

@@ -5,7 +5,7 @@ from pyrogram.types import Message
 from pyrogram import filters
 from config import ADMINS, BOT_STATS_TEXT
 from datetime import datetime
-from helper_func import get_readable_time, not_banned, ALL_COMMANDS
+from helper_func import get_readable_time, not_banned, ALL_COMMANDS, subscribed
 from database.database import (
     add_user, present_user, full_userbase, get_all_stats,
     get_total_shares, get_banned_count, get_recent_users
@@ -48,7 +48,7 @@ async def stats(bot: Bot, message: Message):
     await message.reply(text, quote=True)
 
 
-@Bot.on_message(filters.command('ping') & filters.private, group=2)
+@Bot.on_message(filters.command('ping') & filters.private & subscribed, group=2)
 async def ping(client, message: Message):
     import time
     from database.database import ping_db
