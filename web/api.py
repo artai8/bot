@@ -412,9 +412,9 @@ async def api_share_forward(request):
         suffix = ""
         if keywords:
             kw = html.escape(str(keywords[0]))
-                # 使用 Telegram 原生 blockquote 文本引用样式展示关键词提示
-                suffix = f"\n<blockquote>在评论区输入（{kw}）查看资源</blockquote>"
-        
+            # 使用 Telegram 原生 blockquote 文本引用样式展示关键词提示
+            suffix = f"\n<blockquote>在评论区输入（{kw}）查看资源</blockquote>"
+
         # 必须对 group_text 进行 HTML 转义，否则特殊字符会导致 parse_mode 失效或报错
         group_text = html.escape(share.get('group_text', '') or '')
         caption = group_text
