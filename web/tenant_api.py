@@ -1,13 +1,15 @@
-"""Tenant-scoped business API."""
-
 from __future__ import annotations
 
 import logging
 import math
+import secrets
+import string
+import time
 from datetime import datetime
 from typing import Any
 
 from aiohttp import web
+from bson import ObjectId
 
 from config import parse_bool, tenant_defaults
 from database.database import store, utcnow
@@ -15,6 +17,120 @@ from tenant import TenantContext, normalize_channel_list
 from web.auth import PRINCIPAL_KEY, AuthPrincipal, audit_request, require_tenant
 
 logger = logging.getLogger(__name__)
+
+# 自动将新增配置项注入 config 与 tenant 模块（无需手动修改 config.py / tenant.py）
+import types as _types
+import config as _cfg
+import tenant as _tenant_mod
+
+_EXTRA_DEFAULTS = {
+    "force_sub_require_msg": False,
+    "force_sub_msg_prompt": "\n\n💬 <b>附加解锁条件：</b>加入后，请在该频道/关联讨论群内<b>发送一条任意消息</b>，随后点击下方「🔄 重试」即可解锁。",
+    "pay_to_unlock": False,
+    "pay_unlock_expire": 0,
+    "pay_enable_stars": False,
+    "pay_amount_stars": 50,
+    "pay_enable_usdt": False,
+    "pay_amount_usdt": "5.00",
+    "pay_usdt_network": "TRC20",
+    "pay_usdt_address": "",
+    "pay_enable_cashier": False,
+    "pay_custom_url": "",
+    "pay_enable_cdkey": True,
+    "pay_unlock_message": "🔒 <b>当前资源需付费解锁后访问</b>\n\n请选择以下任意一种已启用的方式完成解锁：",
+}
+
+_merged_cfg = dict(getattr(_cfg, "DEFAULT_TENANT_SETTINGS", {}))
+for _k, _v in _EXTRA_DEFAULTS.items():
+    _merged_cfg.setdefault(_k, _v)
+_cfg.DEFAULT_TENANT_SETTINGS = _types.MappingProxyType(_merged_cfg)
+if hasattr(_tenant_mod, "DEFAULT_TENANT_SETTINGS"):
+    _tenant_mod.DEFAULT_TENANT_SETTINGS = _cfg.DEFAULT_TENANT_SETTINGS
+
+if hasattr(_cfg, "tenant_defaults"):
+    _orig_td = _cfg.tenant_defaults
+    def _patched_td():
+        d = dict(_orig_td())
+        for _k, _v in _EXTRA_DEFAULTS.items():
+            d.setdefault(_k, _v)
+        return d
+    _cfg.tenant_defaults = _patched_td
+    if hasattr(_tenant_mod, "tenant_defaults"):
+        _tenant_mod.tenant_defaults = _patched_td
+
+
+# ==============================================================================
+# 1. 允许保存的租户设置字段白名单（已加入「发送消息解锁」与「多种可选付费方式」全部开关）
+# ==============================================================================
+
+BOOLEAN_SETTINGS = {
+    "is_verify",
+    "protect_content",
+    "show_promo",
+    "disable_channel_button",
+    # 可选项 1：绑定强制订阅频道时，是否要求在频道内发送一条任意消息才能解锁
+    "force_sub_require_msg",
+    # 可选项 2：不绑定强制订阅频道时，是否启用付费解锁总开关及 4 种可选付费渠道开关
+    "pay_to_unlock",
+    "pay_enable_stars",
+    "pay_enable_usdt",
+    "pay_enable_cashier",
+    "pay_enable_cdkey",
+}
+
+INTEGER_RANGES = {
+    "verify_expire": (60, 31_536_000),
+    "auto_delete_time": (0, 31_536_000),
+    "share_code_length": (6, 12),
+    "rate_limit_max": (1, 1000),
+    "rate_limit_window": (1, 3600),
+    "pay_unlock_expire": (0, 31_536_000),
+    "pay_amount_stars": (0, 100_000),
+}
+
+TEXT_SETTINGS = {
+    "shortlink_url",
+    "shortlink_api",
+    "tutorial_video",
+    "promo_text",
+    "custom_buttons",
+    "custom_caption",
+    "start_message",
+    "force_sub_message",
+    "force_sub_msg_prompt",
+    "auto_delete_message",
+    "user_reply_text",
+    "about_text",
+    "help_text",
+    "admin_help_text",
+    "keyword_button_text",
+    "pay_amount_usdt",
+    "pay_usdt_network",
+    "pay_usdt_address",
+    "pay_custom_url",
+    "pay_unlock_message",
+}
+
+CHANNEL_SETTINGS = {"bound_channels", "force_sub_channels"}
+
+ALLOWED_SETTINGS = BOOLEAN_SETTINGS | set(INTEGER_RANGES) | TEXT_SETTINGS | CHANNEL_SETTINGS
+
+EXTRA_SETTING_DEFAULTS: dict[str, Any] = {
+    "force_sub_require_msg": False,
+    "force_sub_msg_prompt": "\n\n💬 <b>附加解锁条件：</b>加入后，请在该频道/关联讨论群内<b>发送一条任意消息</b>，随后点击下方「🔄 重试」即可解锁。",
+    "pay_to_unlock": False,
+    "pay_unlock_expire": 0,
+    "pay_enable_stars": False,
+    "pay_amount_stars": 50,
+    "pay_enable_usdt": False,
+    "pay_amount_usdt": "5.00",
+    "pay_usdt_network": "TRC20",
+    "pay_usdt_address": "",
+    "pay_enable_cashier": False,
+    "pay_custom_url": "",
+    "pay_enable_cdkey": True,
+    "pay_unlock_message": "🔒 <b>当前资源需付费解锁后访问</b>\n\n请选择以下任意一种已启用的方式完成解锁：",
+}
 
 
 def _tenant_id(request: web.Request) -> str:
@@ -36,23 +152,33 @@ def _parse_paging(request: web.Request, default: int = 20) -> tuple[int, int]:
 
 
 def _parse_keywords(raw: Any) -> list[str]:
-    values = raw.split(",") if isinstance(raw, str) else raw if isinstance(raw, list) else []
-    result: list[str] = []
-    for value in values:
-        item = str(value).strip()[:32]
-        if item and item not in result:
-            result.append(item)
-    return result
+    if isinstance(raw, str):
+        items = [part.strip().lower() for part in raw.split(",")]
+    elif isinstance(raw, list):
+        items = [str(part).strip().lower() for part in raw]
+    else:
+        return []
+    seen: list[str] = []
+    for item in items:
+        if item and item not in seen:
+            seen.append(item[:64])
+    return seen[:20]
 
 
 def _json_value(value: Any) -> Any:
-    return value.isoformat() if isinstance(value, datetime) else value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, ObjectId):
+        return str(value)
+    return value
 
 
 async def _tenant_context(tenant_id: str) -> tuple[dict[str, Any], TenantContext]:
     tenant = await store.get_tenant(tenant_id)
     if not tenant:
-        raise web.HTTPNotFound(text='{"error":"Tenant not found"}', content_type="application/json")
+        raise web.HTTPNotFound(
+            text='{"error":"Tenant not found"}', content_type="application/json"
+        )
     return tenant, TenantContext.from_document(tenant)
 
 
@@ -84,23 +210,12 @@ def _share_json(share: dict[str, Any], username: str) -> dict[str, Any]:
     }
 
 
-def setup_tenant_routes(app: web.Application) -> None:
-    app.router.add_get("/api/dashboard", api_dashboard)
-    app.router.add_get("/api/users", api_users)
-    app.router.add_post("/api/ban", api_ban_user)
-    app.router.add_post("/api/unban", api_unban_user)
-    app.router.add_get("/api/banned", api_banned_users)
-    app.router.add_get("/api/shares", api_shares)
-    app.router.add_get("/api/shares/{code}", api_share_detail)
-    app.router.add_put("/api/shares/{code}", api_share_update)
-    app.router.add_delete("/api/shares/{code}", api_share_delete)
-    app.router.add_post("/api/shares/{code}/forward", api_share_forward)
-    app.router.add_post("/api/broadcast", api_broadcast)
-    app.router.add_get("/api/settings", api_settings)
-    app.router.add_put("/api/settings", api_settings_update)
-    app.router.add_post("/api/settings/reset", api_settings_reset)
-    app.router.add_get("/api/jobs/{job_id}", api_job)
-    app.router.add_get("/api/system/health", api_system_health)
+def _actor(principal: AuthPrincipal) -> dict[str, str]:
+    return {
+        "user_id": principal.user_id,
+        "username": principal.username or "",
+        "role": principal.role,
+    }
 
 
 @require_tenant
@@ -148,15 +263,31 @@ async def api_dashboard(request: web.Request) -> web.Response:
 
 @require_tenant
 async def api_users(request: web.Request) -> web.Response:
+    tenant_id = _tenant_id(request)
     page, per_page = _parse_paging(request)
-    users, total = await store.list_users(_tenant_id(request), page, per_page)
+    users, total = await store.list_users(tenant_id, page, per_page)
+    # 补充每个用户的发言解锁与付费解锁状态字段（供前端列表展示）
+    user_ids = [int(u["user_id"]) for u in users if "user_id" in u]
+    extra_map: dict[int, dict[str, Any]] = {}
+    if user_ids:
+        cursor = store.users.find(
+            {"tenant_id": str(tenant_id), "user_id": {"$in": user_ids}},
+            {"_id": 0, "user_id": 1, "force_sub_status": 1, "paid_status": 1},
+        )
+        async for doc in cursor:
+            extra_map[int(doc["user_id"])] = doc
+    for u in users:
+        uid = int(u.get("user_id", 0))
+        if uid in extra_map:
+            u["force_sub_status"] = extra_map[uid].get("force_sub_status") or {}
+            u["paid_status"] = extra_map[uid].get("paid_status") or {}
     return web.json_response(
         {
             "users": users,
             "total": total,
             "page": page,
             "per_page": per_page,
-            "total_pages": math.ceil(total / per_page),
+            "total_pages": math.ceil(total / per_page) if per_page else 1,
         }
     )
 
@@ -215,9 +346,7 @@ async def api_shares(request: web.Request) -> web.Response:
     username = (runtime or {}).get("bot_username") or tenant.get("bot_username", "")
     search = request.query.get("search", "").strip()
     if search:
-        shares, total = await store.search_shares_page(
-            tenant_id, search, page, per_page
-        )
+        shares, total = await store.search_shares_page(tenant_id, search, page, per_page)
     else:
         shares, total = await store.list_shares(tenant_id, page, per_page)
     return web.json_response(
@@ -226,7 +355,7 @@ async def api_shares(request: web.Request) -> web.Response:
             "total": total,
             "page": page,
             "per_page": per_page,
-            "total_pages": math.ceil(total / per_page),
+            "total_pages": math.ceil(total / per_page) if per_page else 1,
         }
     )
 
@@ -276,10 +405,6 @@ async def api_share_delete(request: web.Request) -> web.Response:
         return web.json_response({"error": "Share not found"}, status=404)
     await audit_request(request, "share.delete", target=code)
     return web.json_response({"success": True})
-
-
-def _actor(principal: AuthPrincipal) -> dict[str, str]:
-    return {"role": principal.actor_role, "id": principal.actor_id}
 
 
 @require_tenant
@@ -350,7 +475,10 @@ async def api_broadcast(request: web.Request) -> web.Response:
 @require_tenant
 async def api_settings(request: web.Request) -> web.Response:
     tenant, context = await _tenant_context(_tenant_id(request))
-    result = dict(context.settings)
+    result = dict(EXTRA_SETTING_DEFAULTS)
+    result.update(dict(context.settings))
+    raw_settings = (tenant or {}).get("settings") or {}
+    result.update(raw_settings)
     result.update(
         {
             "owner_id": context.owner_id,
@@ -362,39 +490,6 @@ async def api_settings(request: web.Request) -> web.Response:
         }
     )
     return web.json_response(result)
-
-
-BOOLEAN_SETTINGS = {
-    "is_verify",
-    "protect_content",
-    "show_promo",
-    "disable_channel_button",
-}
-INTEGER_RANGES = {
-    "verify_expire": (60, 31_536_000),
-    "auto_delete_time": (0, 31_536_000),
-    "share_code_length": (6, 12),
-    "rate_limit_max": (1, 1000),
-    "rate_limit_window": (1, 3600),
-}
-TEXT_SETTINGS = {
-    "shortlink_url",
-    "shortlink_api",
-    "tutorial_video",
-    "promo_text",
-    "custom_buttons",
-    "custom_caption",
-    "start_message",
-    "force_sub_message",
-    "auto_delete_message",
-    "user_reply_text",
-    "about_text",
-    "help_text",
-    "admin_help_text",
-    "keyword_button_text",
-}
-CHANNEL_SETTINGS = {"bound_channels", "force_sub_channels"}
-ALLOWED_SETTINGS = BOOLEAN_SETTINGS | set(INTEGER_RANGES) | TEXT_SETTINGS | CHANNEL_SETTINGS
 
 
 def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
@@ -437,10 +532,10 @@ async def api_settings_reset(request: web.Request) -> web.Response:
         return web.json_response({"error": "Invalid JSON"}, status=400)
     if key not in ALLOWED_SETTINGS:
         return web.json_response({"error": "Invalid setting key"}, status=400)
-    if not await store.reset_tenant_setting(_tenant_id(request), key):
-        return web.json_response({"error": "Tenant not found"}, status=404)
+    default_val = EXTRA_SETTING_DEFAULTS.get(key, tenant_defaults().get(key))
+    await store.update_tenant_settings(_tenant_id(request), {key: default_val})
     await audit_request(request, "settings.reset", target=key)
-    return web.json_response({"success": True, "key": key, "value": tenant_defaults().get(key)})
+    return web.json_response({"success": True, "key": key, "value": default_val})
 
 
 @require_tenant
@@ -470,3 +565,124 @@ async def api_system_health(request: web.Request) -> web.Response:
             "web_memory_mb": round(process.memory_info().rss / 1024 / 1024, 2),
         }
     )
+
+
+# ==============================================================================
+# 新增：卡密管理、管理员手动解锁与第三方支付 Webhook 接口
+# ==============================================================================
+
+@require_tenant
+async def api_list_cdkeys(request: web.Request) -> web.Response:
+    tenant_id = _tenant_id(request)
+    cursor = (
+        store.database["cdkeys"]
+        .find({"tenant_id": str(tenant_id)}, {"_id": 0})
+        .sort("created_at", -1)
+        .limit(200)
+    )
+    items = await cursor.to_list(length=200)
+    return web.json_response({"items": items})
+
+
+@require_tenant
+async def api_create_cdkeys(request: web.Request) -> web.Response:
+    tenant_id = _tenant_id(request)
+    body = await request.json()
+    count = max(1, min(200, int(body.get("count", 10) or 10)))
+    alphabet = string.ascii_uppercase + string.digits
+    codes: list[str] = []
+    docs: list[dict[str, Any]] = []
+    now = time.time()
+    for _ in range(count):
+        code = "CDK-" + "".join(secrets.choice(alphabet) for _ in range(10))
+        codes.append(code)
+        docs.append(
+            {
+                "tenant_id": str(tenant_id),
+                "code": code,
+                "created_at": now,
+                "used_by": None,
+                "used_at": None,
+            }
+        )
+    await store.database["cdkeys"].insert_many(docs)
+    await audit_request(request, "cdkeys.create", metadata={"count": len(codes)})
+    return web.json_response({"success": True, "codes": codes})
+
+
+@require_tenant
+async def api_toggle_user_unlock(request: web.Request) -> web.Response:
+    tenant_id = _tenant_id(request)
+    user_id = int(request.match_info["user_id"])
+    body = await request.json()
+    unlocked = bool(body.get("unlocked", True))
+    method = str(body.get("method", "admin_manual"))
+    await store.add_user(tenant_id, user_id)
+    if unlocked:
+        await store.users.update_one(
+            {"tenant_id": str(tenant_id), "user_id": user_id},
+            {
+                "$set": {
+                    "paid_status": {
+                        "is_unlocked": True,
+                        "unlocked_at": time.time(),
+                        "method": method,
+                        "amount": "0",
+                        "tx_ref": "admin",
+                    }
+                }
+            },
+        )
+    else:
+        await store.users.update_one(
+            {"tenant_id": str(tenant_id), "user_id": user_id},
+            {"$set": {"paid_status.is_unlocked": False}},
+        )
+    return web.json_response({"success": True, "user_id": user_id, "unlocked": unlocked})
+
+
+async def api_payment_webhook(request: web.Request) -> web.Response:
+    body = await request.json()
+    tenant_id = str(body.get("tenant_id", "")).strip()
+    user_id = int(body.get("user_id", 0) or 0)
+    if not tenant_id or not user_id:
+        return web.json_response({"error": "Missing tenant_id or user_id"}, status=400)
+    await store.add_user(tenant_id, user_id)
+    await store.users.update_one(
+        {"tenant_id": tenant_id, "user_id": user_id},
+        {
+            "$set": {
+                "paid_status": {
+                    "is_unlocked": True,
+                    "unlocked_at": time.time(),
+                    "method": str(body.get("method", "webhook")),
+                    "amount": str(body.get("amount", "0")),
+                    "tx_ref": str(body.get("tx_ref", "")),
+                }
+            }
+        },
+    )
+    return web.json_response({"success": True})
+
+
+def setup_tenant_routes(app: web.Application) -> None:
+    app.router.add_get("/api/dashboard", api_dashboard)
+    app.router.add_get("/api/users", api_users)
+    app.router.add_post("/api/ban", api_ban_user)
+    app.router.add_post("/api/unban", api_unban_user)
+    app.router.add_get("/api/banned", api_banned_users)
+    app.router.add_get("/api/shares", api_shares)
+    app.router.add_get("/api/shares/{code}", api_share_detail)
+    app.router.add_put("/api/shares/{code}", api_share_update)
+    app.router.add_delete("/api/shares/{code}", api_share_delete)
+    app.router.add_post("/api/shares/{code}/forward", api_share_forward)
+    app.router.add_post("/api/broadcast", api_broadcast)
+    app.router.add_get("/api/settings", api_settings)
+    app.router.add_put("/api/settings", api_settings_update)
+    app.router.add_post("/api/settings/reset", api_settings_reset)
+    app.router.add_get("/api/jobs/{job_id}", api_job)
+    app.router.add_get("/api/system/health", api_system_health)
+    app.router.add_get("/api/cdkeys", api_list_cdkeys)
+    app.router.add_post("/api/cdkeys", api_create_cdkeys)
+    app.router.add_post("/api/users/{user_id}/unlock", api_toggle_user_unlock)
+    app.router.add_post("/api/pay/webhook", api_payment_webhook)
