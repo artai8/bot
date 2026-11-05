@@ -12,16 +12,29 @@
     <div class="spinner"></div>
   </div>
 
-  <!-- Auth Screen -->
+  <!-- Auth Screen — Master Liquid Glass Panel -->
   <div id="login-modal" class="auth-wrapper">
     <div class="auth-card">
-      <div class="auth-brand">
-        <div class="auth-logo">🤖</div>
-        <h1 id="auth-title">租户控制中心</h1>
-        <p id="auth-subtitle" class="text-muted">登录或注册您的专属 Telegram 文件分享机器人</p>
+      <!-- Top Window Header Bar matching "Liquid Glass UI Kit" -->
+      <div class="glass-window-bar">
+        <span class="glass-window-title">Liquid Glass Console</span>
+        <div class="glass-window-controls">
+          <button type="button" class="glass-circle-ctrl" title="刷新状态" onclick="window.location.reload()">↻</button>
+          <span class="glass-line-ctrl"></span>
+        </div>
       </div>
 
-      <!-- Tenant Login / Register Switch Tabs (Hidden on Admin Path) -->
+      <div class="auth-brand">
+        <div class="auth-brand-row">
+          <div class="auth-logo">🚩</div>
+          <div>
+            <h1 id="auth-title">租户自助控制中心</h1>
+            <p id="auth-subtitle">登录或注册您的专属 Telegram 文件分享机器人</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Segmented Pill Switcher (Matching "Toast / Tabs" from Reference) -->
       <div id="tenant-auth-tabs" class="auth-tabs">
         <button type="button" class="auth-tab active" data-mode="login" onclick="window.FSB.switchAuthTab('login')">租户登录</button>
         <button type="button" id="register-tab-btn" class="auth-tab" data-mode="register" onclick="window.FSB.switchAuthTab('register')">新用户注册</button>
@@ -31,11 +44,11 @@
       <form id="login-form" class="auth-form">
         <div class="form-group">
           <label id="login-id-label" for="login-username">租户账号标识 (Slug)</label>
-          <input type="text" id="login-username" class="form-control" placeholder="请输入账号标识" required autocomplete="username" />
+          <input type="text" id="login-username" class="form-control" placeholder="请输入账号标识..." required autocomplete="username" />
         </div>
         <div class="form-group">
           <label for="login-password">登录密码</label>
-          <input type="password" id="login-password" class="form-control" placeholder="请输入登录密码" required autocomplete="current-password" />
+          <input type="password" id="login-password" class="form-control" placeholder="请输入登录密码..." required autocomplete="current-password" />
         </div>
         <button type="submit" id="login-btn" class="btn btn-primary btn-block">立即登录</button>
       </form>
@@ -78,14 +91,14 @@
     </div>
   </div>
 
-  <!-- Main Application Shell -->
+  <!-- Main Application Shell — Liquid Glass Workspace -->
   <div id="app-container" class="app-shell hidden">
     <aside class="sidebar">
       <div class="sidebar-header">
-        <span class="sidebar-logo">⚡</span>
+        <div class="sidebar-logo">🚩</div>
         <div class="sidebar-title-wrap">
           <div id="sidebar-brand" class="sidebar-brand">机器人控制台</div>
-          <div id="sidebar-role-badge" class="badge badge-info">租户</div>
+          <div><span id="sidebar-role-badge" class="badge badge-info">租户</span></div>
         </div>
       </div>
 
@@ -108,16 +121,21 @@
       <header id="top-header" class="top-header">
         <div class="header-left">
           <h2 id="page-title" class="page-title">数据概览</h2>
-          <span id="current-tenant-indicator" class="badge badge-secondary hidden"></span>
+          <span id="current-tenant-indicator" class="badge badge-info hidden"></span>
         </div>
-        <div class="header-right" id="header-actions"></div>
+        <div class="header-right" id="header-actions">
+          <div class="glass-window-controls">
+            <button type="button" class="glass-circle-ctrl" title="刷新当前视图" onclick="window.FSB.loadPage(window.FSB.currentPage || 'dashboard')">↻</button>
+            <span class="glass-line-ctrl"></span>
+          </div>
+        </div>
       </header>
 
       <section id="page-content" class="page-content"></section>
     </main>
   </div>
 
-  <!-- Reusable Modal -->
+  <!-- Reusable Liquid Glass Modal -->
   <div id="modal-container" class="modal-backdrop hidden">
     <div class="modal-dialog">
       <div class="modal-header">
