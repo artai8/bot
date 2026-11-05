@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import math
 import re
@@ -17,10 +19,17 @@ from aiohttp import web
 import config as _cfg
 import tenant as _tenant_mod
 from config import CONFIG, parse_bool, tenant_defaults
-from database.database import store, timestamp, utcnow
-from security import TenantCrypto, hash_password, mask_bot_token
+from database.database import store, timestamp
+from security import TenantCrypto, hash_password, mask_bot_token, verify_plain_secret
 from tenant import TenantContext, normalize_channel_list
-from web.auth import MAX_LOGIN_PASSWORD_LENGTH, PRINCIPAL_KEY, AuthPrincipal, audit_request, require_tenant
+from web.auth import (
+    MAX_LOGIN_PASSWORD_LENGTH,
+    PRINCIPAL_KEY,
+    AuthPrincipal,
+    audit_request,
+    require_tenant,
+    verify_telegram_bot_and_channel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +46,7 @@ _EXTRA_DEFAULTS: dict[str, Any] = {
     "pay_usdt_address": "",
     "pay_enable_cashier": False,
     "pay_custom_url": "",
+    "pay_webhook_secret": "",
     "pay_enable_cdkey": True,
     "pay_unlock_message": "🔒 <b>当前资源需付费解锁后访问</b>\n\n请选择以下任意一种已启用的方式完成解锁：",
 }
@@ -719,13 +729,13 @@ async def api_settings_update(request: web.Request) -> web.Response:
                     continue
         core_updates["admin_ids"] = admins_list
 
-    if "bot_token" in data and str(data.get("bot_token") or "").strip():
-        raw_token = str(data["bot_token"]).strip()
-        crypto = TenantCrypto.from_key(CONFIG.tenant_master_key)
-        core_updates["bot_token_ciphertext"] = crypto.encrypt_bot_token(raw_token)
-        core_updates["bot_token_hint"] = mask_bot_token(raw_token)
+    crypto = TenantCrypto.from_key(CONFIG.tenant_master_key)
+    raw_new_token = str(data.get("bot_token") or "").strip() if "bot_token" in data else ""
+    if raw_new_token:
+        core_updates["bot_token_ciphertext"] = crypto.encrypt_bot_token(raw_new_token)
+        core_updates["bot_token_hint"] = mask_bot_token(raw_new_token)
 
-    if "bot_username" in data:
+    if "bot_username" in data and str(data.get("bot_username") or "").strip():
         core_updates["bot_username"] = str(data.get("bot_username") or "").strip().lstrip("@")
 
     if "web_password" in data and str(data.get("web_password") or "").strip():
@@ -734,11 +744,29 @@ async def api_settings_update(request: web.Request) -> web.Response:
             return web.json_response({"error": "密码长度需在 4 到 1024 位之间"}, status=400)
         core_updates["web_password_hash"] = hash_password(new_pw)
 
+    eff_db = int(core_updates.get("db_channel_id", doc.get("db_channel_id", 0)) or 0)
+    eff_own = int(core_updates.get("owner_id", doc.get("owner_id", 0)) or 0)
+    want_enable = parse_bool(data.get("enabled")) if "enabled" in data else bool(doc.get("enabled", False))
+
+    if raw_new_token or (want_enable and ("enabled" in data or "db_channel_id" in data)):
+        effective_plain_token = raw_new_token
+        if not effective_plain_token and doc.get("bot_token_ciphertext"):
+            try:
+                effective_plain_token = crypto.decrypt_bot_token(str(doc["bot_token_ciphertext"]))
+            except Exception:
+                effective_plain_token = ""
+        if effective_plain_token:
+            verify_res = await verify_telegram_bot_and_channel(
+                effective_plain_token,
+                eff_db if want_enable else 0,
+            )
+            if not verify_res.get("ok"):
+                return web.json_response({"error": verify_res.get("error") or "Bot Token 或频道校验未通过"}, status=400)
+            if verify_res.get("bot_username") and not core_updates.get("bot_username"):
+                core_updates["bot_username"] = str(verify_res["bot_username"])
+
     if "enabled" in data:
-        want_enable = parse_bool(data.get("enabled"))
         has_tok = bool(core_updates.get("bot_token_ciphertext") or doc.get("bot_token_ciphertext"))
-        eff_db = int(core_updates.get("db_channel_id", doc.get("db_channel_id", 0)) or 0)
-        eff_own = int(core_updates.get("owner_id", doc.get("owner_id", 0)) or 0)
         if want_enable and (not has_tok or eff_db == 0 or eff_own == 0):
             return web.json_response(
                 {"error": "启用机器人前，请先配置 Bot Token、Owner Telegram ID 和存储频道 ID"},
@@ -945,6 +973,7 @@ async def api_toggle_user_unlock(request: web.Request) -> web.Response:
 
 
 async def api_payment_webhook(request: web.Request) -> web.Response:
+    raw_bytes = await request.read()
     try:
         body = await request.json()
     except Exception:
@@ -956,6 +985,22 @@ async def api_payment_webhook(request: web.Request) -> web.Response:
         return web.json_response({"error": "Invalid user_id"}, status=400)
     if not tenant_id:
         return web.json_response({"error": "Missing tenant_id"}, status=400)
+
+    tenant_doc = await store.get_tenant(tenant_id)
+    if not tenant_doc:
+        return web.json_response({"error": "Tenant not found"}, status=404)
+
+    settings = tenant_doc.get("settings") or {}
+    webhook_secret = str(settings.get("pay_webhook_secret") or "").strip()
+    if webhook_secret:
+        header_sig = (
+            request.headers.get("X-Webhook-Signature")
+            or request.headers.get("X-Webhook-Secret")
+            or str(body.get("secret") or body.get("sign") or "")
+        ).strip()
+        expected_hmac = hmac.new(webhook_secret.encode("utf-8"), raw_bytes, hashlib.sha256).hexdigest()
+        if not (verify_plain_secret(header_sig, webhook_secret) or verify_plain_secret(header_sig, expected_hmac)):
+            return web.json_response({"error": "Invalid webhook signature"}, status=403)
 
     await store.add_user(tenant_id, user_id)
     await store.users.update_one(

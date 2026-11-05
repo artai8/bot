@@ -24,7 +24,7 @@
       <!-- Tenant Login / Register Switch Tabs (Hidden on Admin Path) -->
       <div id="tenant-auth-tabs" class="auth-tabs">
         <button type="button" class="auth-tab active" data-mode="login" onclick="window.FSB.switchAuthTab('login')">租户登录</button>
-        <button type="button" class="auth-tab" data-mode="register" onclick="window.FSB.switchAuthTab('register')">新用户注册</button>
+        <button type="button" id="register-tab-btn" class="auth-tab" data-mode="register" onclick="window.FSB.switchAuthTab('register')">新用户注册</button>
       </div>
 
       <!-- Login Form (Used for Tenant Login on / and Admin Login on /{admin_path}) -->
@@ -53,6 +53,10 @@
         <div class="form-group">
           <label for="reg-password">设置登录密码 *</label>
           <input type="password" id="reg-password" class="form-control" placeholder="至少 4 位字符" required />
+        </div>
+        <div id="reg-invite-group" class="form-group hidden">
+          <label for="reg-invite-code">注册邀请码 *</label>
+          <input type="text" id="reg-invite-code" class="form-control" placeholder="请输入管理员提供的注册邀请码" />
         </div>
         <div class="form-divider"><span>机器人核心参数（可注册后在后台随时配置）</span></div>
         <div class="form-group">

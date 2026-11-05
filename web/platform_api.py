@@ -13,7 +13,14 @@ from config import CONFIG, parse_bool
 from database.database import store
 from security import TenantCrypto, hash_password, mask_bot_token
 from tenant import TenantContext
-from web.auth import MAX_LOGIN_PASSWORD_LENGTH, PRINCIPAL_KEY, AuthPrincipal, audit_request, require_platform
+from web.auth import (
+    MAX_LOGIN_PASSWORD_LENGTH,
+    PRINCIPAL_KEY,
+    AuthPrincipal,
+    audit_request,
+    require_platform,
+    verify_telegram_bot_and_channel,
+)
 from web.tenant_api import EXTRA_SETTING_DEFAULTS, normalize_settings
 
 logger = logging.getLogger(__name__)
@@ -80,6 +87,8 @@ async def api_admin_config_get(request: web.Request) -> web.Response:
         {
             "admin_id": cfg.get("admin_id", "admin"),
             "admin_path": cfg.get("admin_path", "admin"),
+            "allow_registration": bool(cfg.get("allow_registration", True)),
+            "registration_invite_code": cfg.get("registration_invite_code", ""),
         }
     )
 
@@ -96,6 +105,8 @@ async def api_admin_config_update(request: web.Request) -> web.Response:
     admin_id = str(data.get("admin_id") or "").strip() if "admin_id" in data else None
     new_password = str(data.get("password") or "") if "password" in data else None
     admin_path = str(data.get("admin_path") or "").strip().strip("/") if "admin_path" in data else None
+    allow_reg = parse_bool(data.get("allow_registration"), True) if "allow_registration" in data else None
+    invite_code = str(data.get("registration_invite_code") or "").strip() if "registration_invite_code" in data else None
 
     if admin_id is not None and (len(admin_id) < 1 or len(admin_id) > 64):
         return web.json_response({"error": "管理员登录 ID 长度需在 1 到 64 位之间"}, status=400)
@@ -117,6 +128,8 @@ async def api_admin_config_update(request: web.Request) -> web.Response:
         admin_id=admin_id,
         new_password=new_password if (new_password and new_password != "") else None,
         admin_path=admin_path,
+        allow_registration=allow_reg,
+        registration_invite_code=invite_code,
     )
     await audit_request(
         request,
@@ -124,6 +137,7 @@ async def api_admin_config_update(request: web.Request) -> web.Response:
         metadata={
             "admin_id": updated.get("admin_id"),
             "admin_path": updated.get("admin_path"),
+            "allow_registration": updated.get("allow_registration"),
             "password_changed": bool(new_password),
         },
     )
@@ -132,6 +146,8 @@ async def api_admin_config_update(request: web.Request) -> web.Response:
             "success": True,
             "admin_id": updated.get("admin_id", "admin"),
             "admin_path": updated.get("admin_path", "admin"),
+            "allow_registration": bool(updated.get("allow_registration", True)),
+            "registration_invite_code": updated.get("registration_invite_code", ""),
         }
     )
 
@@ -141,23 +157,37 @@ async def api_tenants(request: web.Request) -> web.Response:
     enabled_param = request.query.get("enabled")
     enabled_filter = parse_bool(enabled_param) if enabled_param is not None else None
     docs = await store.list_tenants(enabled=enabled_filter)
+    tids = [str(d["_id"]) for d in docs]
+
+    counts_map = await store.aggregate_tenant_counts(tids)
+    lease_cursor = store.leases.find({"tenant_id": {"$in": tids}})
+    runtime_map: dict[str, dict[str, Any]] = {}
+    async for ldoc in lease_cursor:
+        runtime_map[str(ldoc.get("tenant_id"))] = ldoc
 
     items: list[dict[str, Any]] = []
     for doc in docs:
         tid = str(doc["_id"])
-        runtime = await store.get_tenant_runtime(tid)
-        u_cnt = await store.get_user_count(tid)
-        s_cnt = await store.get_total_shares(tid)
-        b_cnt = await store.get_banned_count(tid)
-        c_cnt = await store.database["cdkeys"].count_documents({"tenant_id": tid})
         items.append(
             _tenant_public(
                 doc,
-                runtime=runtime,
-                counts={"users": u_cnt, "shares": s_cnt, "banned": b_cnt, "cdkeys": c_cnt},
+                runtime=runtime_map.get(tid),
+                counts=counts_map.get(tid, {"users": 0, "shares": 0, "banned": 0, "cdkeys": 0}),
             )
         )
     return web.json_response({"tenants": items, "total": len(items)})
+
+
+@require_platform
+async def api_cleanup_empty_tenants(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    hours = float(data.get("older_than_hours") or 0)
+    deleted_count = await store.cleanup_unconfigured_tenants(older_than_hours=hours)
+    await audit_request(request, "platform.cleanup_tenants", metadata={"deleted": deleted_count})
+    return web.json_response({"success": True, "deleted": deleted_count})
 
 
 @require_platform
@@ -167,15 +197,12 @@ async def api_tenant_detail(request: web.Request) -> web.Response:
     if not doc:
         return web.json_response({"error": "Tenant not found"}, status=404)
     runtime = await store.get_tenant_runtime(tid)
-    u_cnt = await store.get_user_count(tid)
-    s_cnt = await store.get_total_shares(tid)
-    b_cnt = await store.get_banned_count(tid)
-    c_cnt = await store.database["cdkeys"].count_documents({"tenant_id": tid})
+    counts_map = await store.aggregate_tenant_counts([tid])
     return web.json_response(
         _tenant_public(
             doc,
             runtime=runtime,
-            counts={"users": u_cnt, "shares": s_cnt, "banned": b_cnt, "cdkeys": c_cnt},
+            counts=counts_map.get(tid),
         )
     )
 
@@ -236,13 +263,13 @@ async def api_tenant_update(request: web.Request) -> web.Response:
                     continue
         core_updates["admin_ids"] = admins_list
 
-    if "bot_token" in data and str(data.get("bot_token") or "").strip():
-        raw_token = str(data["bot_token"]).strip()
+    raw_new_token = str(data.get("bot_token") or "").strip() if "bot_token" in data else ""
+    if raw_new_token:
         crypto = _crypto()
-        core_updates["bot_token_ciphertext"] = crypto.encrypt_bot_token(raw_token)
-        core_updates["bot_token_hint"] = mask_bot_token(raw_token)
+        core_updates["bot_token_ciphertext"] = crypto.encrypt_bot_token(raw_new_token)
+        core_updates["bot_token_hint"] = mask_bot_token(raw_new_token)
 
-    if "bot_username" in data:
+    if "bot_username" in data and str(data.get("bot_username") or "").strip():
         core_updates["bot_username"] = str(data.get("bot_username") or "").strip().lstrip("@")
 
     if "web_password" in data and str(data.get("web_password") or "").strip():
@@ -285,9 +312,26 @@ async def api_tenant_delete(request: web.Request) -> web.Response:
 @require_platform
 async def api_tenant_enable(request: web.Request) -> web.Response:
     tid = request.match_info["tenant_id"]
-    doc = await store.update_tenant_core(tid, {"enabled": True})
+    doc = await store.get_tenant(tid)
     if not doc:
         return web.json_response({"error": "Tenant not found"}, status=404)
+    if not doc.get("bot_token_ciphertext") or not int(doc.get("db_channel_id") or 0) or not int(doc.get("owner_id") or 0):
+        return web.json_response(
+            {"error": "启用前需先为该租户配置 Bot Token、Owner ID 与存储频道 ID"},
+            status=400,
+        )
+    try:
+        plain_token = _crypto().decrypt_bot_token(str(doc["bot_token_ciphertext"]))
+        verify_res = await verify_telegram_bot_and_channel(plain_token, int(doc.get("db_channel_id") or 0))
+        if not verify_res.get("ok"):
+            return web.json_response({"error": verify_res.get("error") or "Bot 校验未通过"}, status=400)
+        updates: dict[str, Any] = {"enabled": True}
+        if verify_res.get("bot_username"):
+            updates["bot_username"] = str(verify_res["bot_username"])
+        doc = await store.update_tenant_core(tid, updates) or doc
+    except Exception:
+        doc = await store.update_tenant_core(tid, {"enabled": True}) or doc
+
     runtime = await store.get_tenant_runtime(tid)
     await audit_request(request, "platform.tenant_enable", tenant_id=tid)
     return web.json_response({"ok": True, "tenant": _tenant_public(doc, runtime=runtime)})
@@ -365,6 +409,7 @@ def setup_platform_routes(app: web.Application) -> None:
     app.router.add_get("/api/admin/config", api_admin_config_get)
     app.router.add_put("/api/admin/config", api_admin_config_update)
     app.router.add_get("/api/platform/tenants", api_tenants)
+    app.router.add_post("/api/platform/tenants/cleanup", api_cleanup_empty_tenants)
     app.router.add_get("/api/platform/tenants/{tenant_id}", api_tenant_detail)
     app.router.add_patch("/api/platform/tenants/{tenant_id}", api_tenant_update)
     app.router.add_put("/api/platform/tenants/{tenant_id}", api_tenant_update)

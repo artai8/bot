@@ -3,8 +3,14 @@
   const FSB = window.FSB;
 
   let isAdminEntryRoute = false;
+  let allowRegistration = true;
+  let requireInviteCode = false;
 
   function switchAuthTab(mode) {
+    if (mode === "register" && !allowRegistration) {
+      FSB.toast("管理员当前已关闭新用户注册", "error");
+      return;
+    }
     const loginForm = document.getElementById("login-form");
     const regForm = document.getElementById("register-form");
     const tabs = document.querySelectorAll("#tenant-auth-tabs .auth-tab");
@@ -25,6 +31,8 @@
     const titleEl = document.getElementById("auth-title");
     const subEl = document.getElementById("auth-subtitle");
     const tabsEl = document.getElementById("tenant-auth-tabs");
+    const regTabBtn = document.getElementById("register-tab-btn");
+    const inviteGroup = document.getElementById("reg-invite-group");
     const idLabel = document.getElementById("login-id-label");
     const idInput = document.getElementById("login-username");
     const regForm = document.getElementById("register-form");
@@ -42,6 +50,14 @@
       titleEl.textContent = "租户自助控制中心";
       subEl.textContent = "登录或注册您的专属 Telegram 文件分享机器人";
       tabsEl.classList.remove("hidden");
+      if (regTabBtn) {
+        if (allowRegistration) regTabBtn.classList.remove("hidden");
+        else regTabBtn.classList.add("hidden");
+      }
+      if (inviteGroup) {
+        if (requireInviteCode) inviteGroup.classList.remove("hidden");
+        else inviteGroup.classList.add("hidden");
+      }
       idLabel.textContent = "租户账号标识 (Slug)";
       idInput.placeholder = "请输入您的租户账号标识";
     }
@@ -67,7 +83,7 @@
       nav.innerHTML = `
         <div class="nav-section-title">平台全局管理</div>
         <button class="nav-item" data-page="admin_tenants" onclick="window.FSB.loadPage('admin_tenants')">🏢 全部租户总览</button>
-        <button class="nav-item" data-page="admin_security" onclick="window.FSB.loadPage('admin_security')">🔐 管理员账号与路径设置</button>
+        <button class="nav-item" data-page="admin_security" onclick="window.FSB.loadPage('admin_security')">🔐 管理员与注册设置</button>
         <div class="nav-section-title">当前所选租户的全量管理</div>
         <button class="nav-item" data-page="dashboard" onclick="window.FSB.loadPage('dashboard')">📊 租户数据概览</button>
         <button class="nav-item" data-page="settings" onclick="window.FSB.loadPage('settings')">⚙️ 租户全部设置项</button>
@@ -115,7 +131,7 @@
 
     const titleMap = {
       admin_tenants: "全部租户管理（可管理所有租户的设置与数据）",
-      admin_security: "管理员登录ID、密码与后台路径后缀设置",
+      admin_security: "管理员登录ID、密码、后台路径后缀与注册控制",
       dashboard: "租户数据概览",
       settings: "全部设置项与机器人核心配置",
       shares: "分享合集与链接数据管理",
@@ -165,10 +181,12 @@
 
   async function handleRegister(e) {
     e.preventDefault();
+    const inviteEl = document.getElementById("reg-invite-code");
     const payload = {
       slug: document.getElementById("reg-slug").value.trim(),
       display_name: document.getElementById("reg-display-name").value.trim(),
       password: document.getElementById("reg-password").value,
+      invite_code: inviteEl ? inviteEl.value.trim() : "",
       bot_token: document.getElementById("reg-bot-token").value.trim(),
       owner_id: Number(document.getElementById("reg-owner-id").value || 0),
       db_channel_id: Number(document.getElementById("reg-db-channel").value || 0),
@@ -204,6 +222,8 @@
       if (routeRes.ok) {
         const routeData = await routeRes.json();
         isAdminEntryRoute = Boolean(routeData.is_admin_entry);
+        allowRegistration = routeData.allow_registration !== false;
+        requireInviteCode = Boolean(routeData.require_invite_code);
       }
     } catch (_) {}
 
@@ -217,7 +237,7 @@
       try {
         const sess = await FSB.api("/api/session");
         if (sess && sess.authenticated) {
-          if (( isAdminEntryRoute && sess.role === "platform") || (!isAdminEntryRoute && sess.role === "tenant")) {
+          if ((isAdminEntryRoute && sess.role === "platform") || (!isAdminEntryRoute && sess.role === "tenant")) {
             FSB.sessionRole = sess.role;
             await showApp();
             return;

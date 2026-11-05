@@ -146,6 +146,9 @@
       <div class="card">
         <div class="card-header">
           <div class="card-title">所有租户列表 — 点击对应按钮即可直接管理该租户的所有设置项与所有数据</div>
+          <div class="btn-group">
+            <button class="btn btn-sm btn-secondary" onclick="window.FSB.cleanupUnconfiguredTenants()">🧹 一键清理未配置Bot的空置租户</button>
+          </div>
         </div>
         <div class="card-body">
           <div class="table-responsive">
@@ -170,6 +173,17 @@
         </div>
       </div>
     `;
+  }
+
+  async function cleanupUnconfiguredTenants() {
+    if (!confirm("确定要清理所有未配置 Bot Token 且没有任何分享/用户数据的空置租户吗？")) return;
+    try {
+      const res = await FSB.api("/api/platform/tenants/cleanup", { method: "POST", body: {} });
+      FSB.toast("成功清理 " + (res.deleted || 0) + " 个空置租户", "success");
+      await renderAdminTenantsOverview();
+    } catch (err) {
+      FSB.toast(err.message, "error");
+    }
   }
 
   async function toggleTenantEnable(tenantId, enable) {
@@ -212,7 +226,7 @@
     container.innerHTML = `
       <div class="card">
         <div class="card-header">
-          <div class="card-title">管理员系统安全与入口设置</div>
+          <div class="card-title">管理员系统安全、入口后缀与租户注册控制</div>
         </div>
         <div class="card-body">
           <form id="admin-config-form">
@@ -234,7 +248,16 @@
               <label for="adm-cfg-pw">修改管理员登录密码 (留空则保持原密码不变)</label>
               <input type="password" id="adm-cfg-pw" class="form-control" placeholder="输入新管理员密码（留空不修改）" />
             </div>
-            <button type="submit" class="btn btn-primary">保存管理员设置</button>
+            <div class="form-divider"><span>新租户注册安全与防刷设置</span></div>
+            <div class="form-check">
+              <input type="checkbox" id="adm-cfg-allow-reg" ${cfg.allow_registration !== false ? "checked" : ""} />
+              <label for="adm-cfg-allow-reg" style="margin:0;cursor:pointer;">允许新租户在主域名首页自主注册账号</label>
+            </div>
+            <div class="form-group">
+              <label for="adm-cfg-invite">注册邀请码限制 (选填，留空则无需邀请码即可注册)</label>
+              <input type="text" id="adm-cfg-invite" class="form-control" value="${FSB.esc(cfg.registration_invite_code || "")}" placeholder="留空表示开放注册；设置后租户需输入此邀请码才可注册" />
+            </div>
+            <button type="submit" class="btn btn-primary">保存管理员与注册设置</button>
           </form>
         </div>
       </div>
@@ -247,13 +270,20 @@
         const newPath = document.getElementById("adm-cfg-path").value.trim().replace(/^\/+|\/+$/g, "");
         const newId = document.getElementById("adm-cfg-id").value.trim();
         const newPw = document.getElementById("adm-cfg-pw").value;
-        const body = { admin_path: newPath, admin_id: newId };
+        const allowReg = document.getElementById("adm-cfg-allow-reg").checked;
+        const inviteCode = document.getElementById("adm-cfg-invite").value.trim();
+        const body = {
+          admin_path: newPath,
+          admin_id: newId,
+          allow_registration: allowReg,
+          registration_invite_code: inviteCode,
+        };
         if (newPw && newPw !== "") {
           body.password = newPw;
         }
         try {
           const res = await FSB.api("/api/admin/config", { method: "PUT", body: body });
-          FSB.toast("管理员设置已更新！新入口: /" + res.admin_path, "success");
+          FSB.toast("管理员设置已更新！当前入口: /" + res.admin_path, "success");
           if (res.admin_path && window.location.pathname.replace(/^\/+|\/+$/g, "") !== res.admin_path) {
             window.history.replaceState({}, "", "/" + res.admin_path);
           }
@@ -270,6 +300,7 @@
     onAdminTenantSelect: onAdminTenantSelect,
     selectAndManageTenant: selectAndManageTenant,
     renderAdminTenantsOverview: renderAdminTenantsOverview,
+    cleanupUnconfiguredTenants: cleanupUnconfiguredTenants,
     toggleTenantEnable: toggleTenantEnable,
     deleteTenantByAdmin: deleteTenantByAdmin,
     renderAdminSecuritySettings: renderAdminSecuritySettings,

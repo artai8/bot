@@ -14,7 +14,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from config import CONFIG, tenant_defaults
+from config import CONFIG, parse_bool, tenant_defaults
 from security import (
     TenantCrypto,
     generate_session_token,
@@ -22,7 +22,6 @@ from security import (
     mask_bot_token,
     token_digest,
     verify_password,
-    verify_plain_secret,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,7 +117,7 @@ class MongoStore:
     async def ensure_admin_config(self) -> dict[str, Any]:
         doc = await self.metadata.find_one({"_id": "admin_config"})
         if doc is not None and isinstance(doc.get("value"), dict):
-            val = doc["value"]
+            val = dict(doc["value"])
             changed = False
             if not val.get("admin_id"):
                 val["admin_id"] = CONFIG.platform_admin_id or "admin"
@@ -129,6 +128,12 @@ class MongoStore:
             if not val.get("password_hash"):
                 val["password_hash"] = hash_password(CONFIG.platform_admin_password or "admin")
                 changed = True
+            if "allow_registration" not in val:
+                val["allow_registration"] = True
+                changed = True
+            if "registration_invite_code" not in val:
+                val["registration_invite_code"] = ""
+                changed = True
             if changed:
                 await self.set_platform_metadata("admin_config", val)
             return val
@@ -137,6 +142,8 @@ class MongoStore:
             "admin_id": CONFIG.platform_admin_id or "admin",
             "password_hash": hash_password(CONFIG.platform_admin_password or "admin"),
             "admin_path": (CONFIG.platform_admin_path or "admin").strip("/") or "admin",
+            "allow_registration": True,
+            "registration_invite_code": "",
         }
         await self.set_platform_metadata("admin_config", initial_config)
         return initial_config
@@ -164,6 +171,8 @@ class MongoStore:
         admin_id: str | None = None,
         new_password: str | None = None,
         admin_path: str | None = None,
+        allow_registration: bool | None = None,
+        registration_invite_code: str | None = None,
     ) -> dict[str, Any]:
         cfg = dict(await self.get_admin_config())
         if admin_id is not None and admin_id.strip():
@@ -174,8 +183,69 @@ class MongoStore:
             cleaned_path = re.sub(r"[^a-zA-Z0-9_-]", "", admin_path.strip().strip("/"))
             if cleaned_path and cleaned_path.lower() not in {"api", "static", "health", "kaithhealthcheck", "kaithheathcheck"}:
                 cfg["admin_path"] = cleaned_path
+        if allow_registration is not None:
+            cfg["allow_registration"] = parse_bool(allow_registration, True)
+        if registration_invite_code is not None:
+            cfg["registration_invite_code"] = str(registration_invite_code).strip()[:128]
         await self.set_platform_metadata("admin_config", cfg)
         return cfg
+
+    async def aggregate_tenant_counts(self, tenant_ids: list[str] | None = None) -> dict[str, dict[str, int]]:
+        match_stage: dict[str, Any] = {}
+        if tenant_ids is not None:
+            match_stage = {"tenant_id": {"$in": [str(t) for t in tenant_ids]}}
+
+        async def _group_count(coll: Any) -> dict[str, int]:
+            pipeline: list[dict[str, Any]] = []
+            if match_stage:
+                pipeline.append({"$match": match_stage})
+            pipeline.append({"$group": {"_id": "$tenant_id", "count": {"$sum": 1}}})
+            out: dict[str, int] = {}
+            async for doc in coll.aggregate(pipeline):
+                tid = str(doc.get("_id") or "")
+                if tid:
+                    out[tid] = int(doc.get("count", 0))
+            return out
+
+        u_map = await _group_count(self.users)
+        s_map = await _group_count(self.shares)
+        b_map = await _group_count(self.banned_users)
+        c_map = await _group_count(self.database["cdkeys"])
+
+        all_ids = set(tenant_ids or []) | set(u_map.keys()) | set(s_map.keys()) | set(b_map.keys()) | set(c_map.keys())
+        result: dict[str, dict[str, int]] = {}
+        for tid in all_ids:
+            result[str(tid)] = {
+                "users": u_map.get(str(tid), 0),
+                "shares": s_map.get(str(tid), 0),
+                "banned": b_map.get(str(tid), 0),
+                "cdkeys": c_map.get(str(tid), 0),
+            }
+        return result
+
+    async def cleanup_unconfigured_tenants(self, older_than_hours: float = 0) -> int:
+        query: dict[str, Any] = {
+            "enabled": False,
+            "$or": [
+                {"bot_token_ciphertext": ""},
+                {"bot_token_ciphertext": {"$exists": False}},
+            ],
+        }
+        if older_than_hours > 0:
+            cutoff = utcnow() - timedelta(hours=older_than_hours)
+            query["created_at"] = {"$lte": cutoff}
+
+        cursor = self.tenants.find(query, {"_id": 1})
+        docs = await cursor.to_list(length=5000)
+        deleted_total = 0
+        for doc in docs:
+            tid = str(doc["_id"])
+            s_cnt = await self.get_total_shares(tid)
+            u_cnt = await self.get_user_count(tid)
+            if s_cnt == 0 and u_cnt == 0:
+                if await self.delete_tenant(tid):
+                    deleted_total += 1
+        return deleted_total
 
     async def create_tenant(
         self,
@@ -275,11 +345,11 @@ class MongoStore:
     async def update_tenant_settings(self, tenant_id: str, settings: dict[str, Any]) -> dict[str, Any] | None:
         if not settings:
             return await self.get_tenant(tenant_id)
-        set_Ops = {f"settings.{k}": v for k, v in settings.items()}
-        set_Ops["updated_at"] = utcnow()
+        set_ops = {f"settings.{k}": v for k, v in settings.items()}
+        set_ops["updated_at"] = utcnow()
         return await self.tenants.find_one_and_update(
             {"_id": str(tenant_id)},
-            {"$set": set_Ops, "$inc": {"config_version": 1}},
+            {"$set": set_ops, "$inc": {"config_version": 1}},
             return_document=ReturnDocument.AFTER,
         )
 

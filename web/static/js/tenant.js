@@ -34,6 +34,7 @@
     { key: "pay_usdt_network", label: "USDT 网络类型 (如 TRC20 / BEP20)", multiline: false },
     { key: "pay_usdt_address", label: "USDT 收款钱包地址 (pay_usdt_address)", multiline: false },
     { key: "pay_custom_url", label: "发卡网/收银台链接 (pay_custom_url)", multiline: false },
+    { key: "pay_webhook_secret", label: "支付回调签名密钥 (pay_webhook_secret，选填，防伪造回调)", multiline: false },
     { key: "custom_caption", label: "自定义附加说明文案 (custom_caption)", multiline: true },
     { key: "custom_buttons", label: "自定义底部按钮配置 (每行: 按钮名 | 链接)", multiline: true },
     { key: "promo_text", label: "推广签名文案 (promo_text)", multiline: true },
@@ -53,7 +54,7 @@
       const container = document.getElementById("page-content");
       if (container) {
         container.innerHTML =
-          '<div class="card"><div class="card-body"><p class="text-muted">请先在左侧顶部下拉框中选择一个租户，或在「全部租户管理」中点击某个租户进行管理。</p></div></div>';
+          '<div class="card"><div class="card-body"><p class="text-muted">请先在左侧顶部下拉框中选择一个租户，或在「全部租户总览」中点击某个租户进行管理。</p></div></div>';
       }
       return false;
     }
@@ -205,10 +206,10 @@
             <div class="form-row">
               <div class="form-group">
                 <label>Telegram Bot Token (当前: ${FSB.esc(cfg.bot_token_hint || "未设置")})</label>
-                <input type="text" id="core-bot-token" class="form-control" placeholder="留空保持不变，输入新 Token 则覆盖" />
+                <input type="text" id="core-bot-token" class="form-control" placeholder="留空保持不变，输入新 Token 则实时校验并覆盖" />
               </div>
               <div class="form-group">
-                <label>Bot 用户名 (选填，如 my_share_bot)</label>
+                <label>Bot 用户名 (保存 Token 时会自动识别，也可手动填)</label>
                 <input type="text" id="core-bot-username" class="form-control" value="${FSB.esc(cfg.bot_username || "")}" />
               </div>
             </div>
@@ -228,7 +229,7 @@
             </div>
             <div class="form-check">
               <input type="checkbox" id="core-enabled" ${cfg.enabled ? "checked" : ""} />
-              <label for="core-enabled" style="margin:0;cursor:pointer;"><strong>启用并运行该租户的 Telegram 机器人实例</strong>（需填妥 Bot Token、Owner ID 与存储频道 ID）</label>
+              <label for="core-enabled" style="margin:0;cursor:pointer;"><strong>启用并运行该租户的 Telegram 机器人实例</strong>（保存时会自动校验 Bot Token 与存储频道管理员权限）</label>
             </div>
           </div>
         </div>

@@ -11,12 +11,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+import aiohttp
 from aiohttp import web
 from pymongo.errors import DuplicateKeyError
 
 from config import CONFIG
 from database.database import store
-from security import TenantCrypto, verify_password
+from security import TenantCrypto, verify_password, verify_plain_secret
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,49 @@ class LoginLimiter:
 
 
 _limiter = LoginLimiter()
+
+
+async def verify_telegram_bot_and_channel(bot_token: str, db_channel_id: int = 0) -> dict[str, Any]:
+    token = (bot_token or "").strip()
+    if not token or ":" not in token:
+        return {"ok": False, "error": "Telegram Bot Token 格式无效（应类似 123456789:AAH...）"}
+    base_url = f"https://api.telegram.org/bot{token}"
+    timeout = aiohttp.ClientTimeout(total=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{base_url}/getMe") as resp:
+                data = await resp.json()
+                if not data.get("ok") or not isinstance(data.get("result"), dict):
+                    return {"ok": False, "error": "Telegram Bot Token 无效或已被撤销"}
+                bot_info = data["result"]
+                bot_id = int(bot_info.get("id", 0))
+                bot_username = str(bot_info.get("username") or "").strip()
+
+            if int(db_channel_id or 0) != 0:
+                async with session.get(
+                    f"{base_url}/getChatMember",
+                    params={"chat_id": int(db_channel_id), "user_id": bot_id},
+                ) as c_resp:
+                    c_data = await c_resp.json()
+                    if not c_data.get("ok") or not isinstance(c_data.get("result"), dict):
+                        return {
+                            "ok": False,
+                            "bot_username": bot_username,
+                            "error": f"机器人 (@{bot_username}) 无法访问存储频道 {db_channel_id}，请先将机器人拉入该频道并设为管理员",
+                        }
+                    status = str(c_data["result"].get("status") or "")
+                    if status not in {"administrator", "creator"}:
+                        return {
+                            "ok": False,
+                            "bot_username": bot_username,
+                            "error": f"机器人 (@{bot_username}) 在存储频道 {db_channel_id} 中不是管理员（当前状态: {status}）",
+                        }
+            return {"ok": True, "bot_id": bot_id, "bot_username": bot_username}
+    except aiohttp.ClientError:
+        return {"ok": True, "bot_username": "", "network_skipped": True}
+    except Exception as exc:
+        logger.warning("Telegram verification warning: %s", exc)
+        return {"ok": True, "bot_username": "", "network_skipped": True}
 
 
 def bearer_token(request: web.Request) -> str:
@@ -252,12 +296,23 @@ async def api_register(request: web.Request) -> web.Response:
     if _limiter.limited(rate_key):
         return web.json_response({"error": "注册操作过于频繁，请稍后再试"}, status=429)
 
+    admin_cfg = await store.get_admin_config()
+    if not admin_cfg.get("allow_registration", True):
+        return web.json_response({"error": "系统管理员当前已关闭新租户公开注册"}, status=403)
+
     try:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "请求数据格式错误"}, status=400)
     if not isinstance(data, dict):
         return web.json_response({"error": "请求数据格式错误"}, status=400)
+
+    required_invite = str(admin_cfg.get("registration_invite_code") or "").strip()
+    if required_invite:
+        candidate_invite = str(data.get("invite_code") or "").strip()
+        if not verify_plain_secret(candidate_invite, required_invite):
+            _limiter.failure(rate_key)
+            return web.json_response({"error": "注册邀请码错误或未填写"}, status=403)
 
     slug = str(data.get("slug") or data.get("username") or "").strip().lower()
     if not slug or not SLUG_RE.match(slug):
@@ -300,6 +355,13 @@ async def api_register(request: web.Request) -> web.Response:
     if existing is not None:
         return web.json_response({"error": "该租户账号标识已被注册，请更换一个"}, status=409)
 
+    bot_username = ""
+    if bot_token:
+        verify_res = await verify_telegram_bot_and_channel(bot_token, db_channel_id)
+        if not verify_res.get("ok"):
+            return web.json_response({"error": verify_res.get("error") or "Bot Token 验证失败"}, status=400)
+        bot_username = str(verify_res.get("bot_username") or "")
+
     crypto = TenantCrypto.from_key(CONFIG.tenant_master_key)
     can_enable = bool(bot_token and owner_id != 0 and db_channel_id != 0)
     try:
@@ -313,6 +375,7 @@ async def api_register(request: web.Request) -> web.Response:
             web_password=password,
             crypto=crypto,
             enabled=can_enable,
+            bot_username=bot_username,
         )
     except DuplicateKeyError:
         return web.json_response({"error": "该租户账号标识已被注册，请更换一个"}, status=409)
@@ -379,11 +442,14 @@ async def api_session(request: web.Request) -> web.Response:
 
 async def api_route_info(request: web.Request) -> web.Response:
     path_arg = str(request.query.get("path") or "").strip().strip("/")
-    admin_path = await store.get_admin_path()
+    cfg = await store.get_admin_config()
+    admin_path = str(cfg.get("admin_path") or "admin").strip("/") or "admin"
     is_admin_entry = bool(path_arg and path_arg == admin_path)
     return web.json_response(
         {
             "is_admin_entry": is_admin_entry,
+            "allow_registration": bool(cfg.get("allow_registration", True)),
+            "require_invite_code": bool(str(cfg.get("registration_invite_code") or "").strip()),
         }
     )
 

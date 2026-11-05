@@ -117,6 +117,7 @@ _BASE_TENANT_SETTINGS: dict[str, Any] = {
     "pay_usdt_address": "",
     "pay_enable_cashier": False,
     "pay_custom_url": "",
+    "pay_webhook_secret": "",
     "pay_enable_cdkey": True,
     "pay_unlock_message": "🔒 <b>当前资源需付费解锁后访问</b>\n\n请选择以下任意一种已启用的方式完成解锁：",
 }
