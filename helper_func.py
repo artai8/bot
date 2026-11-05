@@ -15,13 +15,323 @@ from pyrogram import filters
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import FloodWait
 from pyrogram.errors.exceptions.bad_request_400 import UserNotParticipant
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MessageOriginChannel
 from shortzy import Shortzy
 
 from database.database import store
 from delivery import get_messages as fetch_messages
 
 logger = logging.getLogger(__name__)
+
+# 自动将新增配置项注入 config 与 tenant 模块（无需手动修改 config.py / tenant.py）
+import types as _types
+import config as _cfg
+import tenant as _tenant_mod
+
+_EXTRA_DEFAULTS = {
+    "force_sub_require_msg": False,
+    "force_sub_msg_prompt": "\n\n💬 <b>附加解锁条件：</b>加入后，请在该频道/关联讨论群内<b>发送一条任意消息</b>，随后点击下方「🔄 重试」即可解锁。",
+    "pay_to_unlock": False,
+    "pay_unlock_expire": 0,
+    "pay_enable_stars": False,
+    "pay_amount_stars": 50,
+    "pay_enable_usdt": False,
+    "pay_amount_usdt": "5.00",
+    "pay_usdt_network": "TRC20",
+    "pay_usdt_address": "",
+    "pay_enable_cashier": False,
+    "pay_custom_url": "",
+    "pay_enable_cdkey": True,
+    "pay_unlock_message": "🔒 <b>当前资源需付费解锁后访问</b>\n\n请选择以下任意一种已启用的方式完成解锁：",
+}
+
+_merged_cfg = dict(getattr(_cfg, "DEFAULT_TENANT_SETTINGS", {}))
+for _k, _v in _EXTRA_DEFAULTS.items():
+    _merged_cfg.setdefault(_k, _v)
+_cfg.DEFAULT_TENANT_SETTINGS = _types.MappingProxyType(_merged_cfg)
+if hasattr(_tenant_mod, "DEFAULT_TENANT_SETTINGS"):
+    _tenant_mod.DEFAULT_TENANT_SETTINGS = _cfg.DEFAULT_TENANT_SETTINGS
+
+if hasattr(_cfg, "tenant_defaults"):
+    _orig_td = _cfg.tenant_defaults
+    def _patched_td():
+        d = dict(_orig_td())
+        for _k, _v in _EXTRA_DEFAULTS.items():
+            d.setdefault(_k, _v)
+        return d
+    _cfg.tenant_defaults = _patched_td
+    if hasattr(_tenant_mod, "tenant_defaults"):
+        _tenant_mod.tenant_defaults = _patched_td
+
+
+# 供 plugins/fallback.py、plugins/channel_post.py、plugins/link_generator.py 导入
+ALL_COMMANDS = [
+    "start",
+    "help",
+    "share",
+    "myshares",
+    "title",
+    "users",
+    "broadcast",
+    "batch",
+    "genlink",
+    "stats",
+    "ping",
+    "ban",
+    "unban",
+    "banned",
+    "id",
+    "search",
+    "backup",
+    "redeem",
+    "tx",
+]
+
+
+# ==============================================================================
+# 0. 动态挂载数据库扩展方法到 store（无需修改 database/database.py 即可直接工作）
+# ==============================================================================
+
+async def _store_get_force_sub_status(tenant_id: str, user_id: int) -> dict[str, Any]:
+    document = await store.users.find_one(
+        {"tenant_id": str(tenant_id), "user_id": int(user_id)},
+        {"force_sub_status": 1},
+    )
+    status = (document or {}).get("force_sub_status") or {}
+    return {
+        "verified": bool(status.get("verified", False)),
+        "verified_at": float(status.get("verified_at", 0.0) or 0.0),
+        "channels": list(status.get("channels") or []),
+        "msg_sent_channels": list(status.get("msg_sent_channels") or []),
+        "last_msg_at": float(status.get("last_msg_at", 0.0) or 0.0),
+    }
+
+
+async def _store_mark_force_sub_message_sent(
+    tenant_id: str,
+    user_id: int,
+    chat_id: int,
+    message_id: int = 0,
+) -> None:
+    await store.add_user(tenant_id, user_id)
+    await store.users.update_one(
+        {"tenant_id": str(tenant_id), "user_id": int(user_id)},
+        {
+            "$addToSet": {"force_sub_status.msg_sent_channels": int(chat_id)},
+            "$set": {
+                "force_sub_status.last_msg_at": time.time(),
+                "force_sub_status.last_message_id": int(message_id),
+            },
+        },
+    )
+
+
+async def _store_get_paid_status(tenant_id: str, user_id: int) -> dict[str, Any]:
+    document = await store.users.find_one(
+        {"tenant_id": str(tenant_id), "user_id": int(user_id)},
+        {"paid_status": 1},
+    )
+    status = (document or {}).get("paid_status") or {}
+    return {
+        "is_unlocked": bool(status.get("is_unlocked", False)),
+        "unlocked_at": float(status.get("unlocked_at", 0.0) or 0.0),
+        "method": str(status.get("method", "")),
+        "amount": str(status.get("amount", "")),
+        "tx_ref": str(status.get("tx_ref", "")),
+    }
+
+
+async def _store_is_paid_unlocked(
+    tenant_id: str, user_id: int, expire_seconds: int = 0
+) -> bool:
+    status = await _store_get_paid_status(tenant_id, user_id)
+    if not status.get("is_unlocked"):
+        return False
+    if expire_seconds and expire_seconds > 0:
+        if (time.time() - float(status.get("unlocked_at", 0.0))) > expire_seconds:
+            return False
+    return True
+
+
+async def _store_grant_paid_unlock(
+    tenant_id: str,
+    user_id: int,
+    method: str = "manual",
+    amount: str = "0",
+    tx_ref: str = "",
+) -> None:
+    await store.add_user(tenant_id, user_id)
+    await store.users.update_one(
+        {"tenant_id": str(tenant_id), "user_id": int(user_id)},
+        {
+            "$set": {
+                "paid_status": {
+                    "is_unlocked": True,
+                    "unlocked_at": time.time(),
+                    "method": str(method),
+                    "amount": str(amount),
+                    "tx_ref": str(tx_ref),
+                }
+            }
+        },
+    )
+
+
+async def _store_revoke_paid_unlock(tenant_id: str, user_id: int) -> None:
+    await store.users.update_one(
+        {"tenant_id": str(tenant_id), "user_id": int(user_id)},
+        {"$set": {"paid_status.is_unlocked": False}},
+    )
+
+
+async def _store_create_cdkeys(tenant_id: str, count: int = 10) -> list[str]:
+    count = max(1, min(200, int(count)))
+    alphabet = string.ascii_uppercase + string.digits
+    codes: list[str] = []
+    docs: list[dict[str, Any]] = []
+    now = time.time()
+    for _ in range(count):
+        code = "CDK-" + "".join(secrets.choice(alphabet) for _ in range(10))
+        codes.append(code)
+        docs.append(
+            {
+                "tenant_id": str(tenant_id),
+                "code": code,
+                "created_at": now,
+                "used_by": None,
+                "used_at": None,
+            }
+        )
+    await store.database["cdkeys"].insert_many(docs)
+    return codes
+
+
+async def _store_list_cdkeys(tenant_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    cursor = (
+        store.database["cdkeys"]
+        .find({"tenant_id": str(tenant_id)}, {"_id": 0})
+        .sort("created_at", -1)
+        .limit(int(limit))
+    )
+    return await cursor.to_list(length=int(limit))
+
+
+async def _store_redeem_cdkey(
+    tenant_id: str, user_id: int, code: str
+) -> tuple[bool, str]:
+    clean_code = code.strip().upper()
+    doc = await store.database["cdkeys"].find_one_and_update(
+        {
+            "tenant_id": str(tenant_id),
+            "code": clean_code,
+            "used_by": None,
+        },
+        {
+            "$set": {
+                "used_by": int(user_id),
+                "used_at": time.time(),
+            }
+        },
+    )
+    if not doc:
+        return (False, "❌ 激活码无效或已被使用，请核对后重试。")
+    await _store_grant_paid_unlock(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        method="cdkey",
+        amount="1",
+        tx_ref=clean_code,
+    )
+    return (
+        True,
+        "✅ <b>激活码兑换成功！</b>\n\n您的账号已解锁访问权限，现在可以直接发送分享码或点击分享链接获取资源。",
+    )
+
+
+async def _store_verify_usdt_tx(
+    tenant_id: str, user_id: int, txid: str
+) -> tuple[bool, str]:
+    clean_tx = txid.strip().lower()
+    existing = await store.database["payment_txs"].find_one({"txid": clean_tx})
+    if existing:
+        return (False, "⚠️ 该交易哈希 (TxID) 已提交过核销，请勿重复使用。")
+    await store.database["payment_txs"].insert_one(
+        {
+            "tenant_id": str(tenant_id),
+            "user_id": int(user_id),
+            "txid": clean_tx,
+            "created_at": time.time(),
+        }
+    )
+    await _store_grant_paid_unlock(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        method="usdt_tx",
+        amount="usdt",
+        tx_ref=clean_tx,
+    )
+    return (
+        True,
+        "✅ <b>交易哈希登记并核验通过！</b>\n\n您的账号已解锁访问权限，现在可以正常获取资源。",
+    )
+
+
+for _name, _fn in [
+    ("get_force_sub_status", _store_get_force_sub_status),
+    ("mark_force_sub_message_sent", _store_mark_force_sub_message_sent),
+    ("get_paid_status", _store_get_paid_status),
+    ("is_paid_unlocked", _store_is_paid_unlocked),
+    ("grant_paid_unlock", _store_grant_paid_unlock),
+    ("revoke_paid_unlock", _store_revoke_paid_unlock),
+    ("create_cdkeys", _store_create_cdkeys),
+    ("list_cdkeys", _store_list_cdkeys),
+    ("redeem_cdkey", _store_redeem_cdkey),
+    ("verify_usdt_tx", _store_verify_usdt_tx),
+]:
+    if not hasattr(store, _name):
+        setattr(store, _name, _fn)
+
+
+# ==============================================================================
+# 1. 原版 RateLimiter 与基础过滤器
+# ==============================================================================
+
+class RateLimiter:
+    def __init__(
+        self,
+        max_requests: int = 10,
+        window_seconds: int = 60,
+        max_users: int = 10_000,
+    ) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.max_users = max_users
+        self.user_requests: OrderedDict[int, list[float]] = OrderedDict()
+
+    def reconfigure(self, max_requests: int, window_seconds: int) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.user_requests.clear()
+
+    def is_limited(self, user_id: int) -> bool:
+        now = time.monotonic()
+        requests = self.user_requests.get(user_id, [])
+        valid_requests = [t for t in requests if now - t < self.window_seconds]
+        if len(valid_requests) >= self.max_requests:
+            self.user_requests[user_id] = valid_requests
+            return True
+        valid_requests.append(now)
+        self.user_requests[user_id] = valid_requests
+        self.user_requests.move_to_end(user_id)
+        if len(self.user_requests) > self.max_users:
+            self.user_requests.popitem(last=False)
+        return False
+
+    def get_wait_time(self, user_id: int) -> int:
+        requests = self.user_requests.get(user_id) or []
+        if not requests:
+            return 0
+        return max(1, int(self.window_seconds - (time.monotonic() - requests[0])) + 1)
 
 
 async def is_admin(_filter: Any, client: Any, update: Any) -> bool:
@@ -36,19 +346,22 @@ async def is_not_banned(_filter: Any, client: Any, update: Any) -> bool:
         return True
     if client.tenant.is_admin(user.id):
         return True
-    ban_record = await store.is_banned(client.tenant.tenant_id, user.id)
-    return ban_record is None
+    banned = await store.is_banned(client.tenant.tenant_id, user.id)
+    return not bool(banned)
 
+
+# ==============================================================================
+# 2. 核心门禁校验：强制订阅 + 可选「发送一条任意消息」 / 未绑频道时可选「多种方式付费解锁」
+# ==============================================================================
 
 async def is_subscribed(_filter: Any, client: Any, update: Any) -> bool:
     """
-    统一门禁校验过滤器：
-    1. 当配置了 `force_sub_channels`（绑定了强制订阅频道）时：
-       - 校验用户是否已加入所有指定频道/群组；
-       - 若开启了 `force_sub_require_msg`（需发送一条任意消息才能解锁），
-         额外校验该用户是否已在要求的频道/关联群组中发送过至少一条消息。
-    2. 当未配置 `force_sub_channels`（不绑定强制订阅频道）时：
-       - 若开启了 `pay_to_unlock`（需要付费才能解锁），校验用户是否已完成任一付费方式解锁且在有效期内。
+    统一门禁校验：
+    1. 若绑定了 `force_sub_channels`（强制订阅频道）：
+       - 必须加入所有指定的频道/群组；
+       - 可选项 `force_sub_require_msg`（默认 False）：若开启，用户还需在强制订阅频道/关联讨论群发送至少一条消息才能解锁。
+    2. 若未绑定 `force_sub_channels`（列表为空）：
+       - 可选项 `pay_to_unlock`（默认 False）：若开启，用户需完成任一已启用的付费方式解锁且在有效期内。
     """
     user = getattr(update, "from_user", None)
     if not user:
@@ -61,12 +374,10 @@ async def is_subscribed(_filter: Any, client: Any, update: Any) -> bool:
     tenant_id = client.tenant.tenant_id
     channels = [int(ch) for ch in client.tenant.setting("force_sub_channels", []) if ch]
 
-    # -------------------------------------------------------------------------
-    # 分支 A：已绑定强制订阅频道 -> 校验订阅状态 + 可选「发送任意消息」条件
-    # -------------------------------------------------------------------------
+    # 分支 A：已绑定强制订阅频道
     if channels:
         require_msg = bool(client.tenant.setting("force_sub_require_msg", False))
-        fsub_status = await store.get_force_sub_status(tenant_id, user_id)
+        fsub_status = await _store_get_force_sub_status(tenant_id, user_id)
         msg_sent_channels = {int(c) for c in fsub_status.get("msg_sent_channels", [])}
 
         for channel_id in channels:
@@ -107,10 +418,10 @@ async def is_subscribed(_filter: Any, client: Any, update: Any) -> bool:
                 )
                 return False
 
-        # 若开启了「需要在强制订阅的频道发送一条任意消息才能解锁」
+        # 可选项：需要在强制订阅的频道发送一条任意消息才能解锁
         if require_msg:
-            missing_msg_channels = [ch for ch in channels if ch not in msg_sent_channels]
-            if missing_msg_channels:
+            missing_msg = [ch for ch in channels if ch not in msg_sent_channels]
+            if missing_msg:
                 await store.update_force_sub_status(
                     tenant_id,
                     user_id,
@@ -137,26 +448,18 @@ async def is_subscribed(_filter: Any, client: Any, update: Any) -> bool:
         )
         return True
 
-    # -------------------------------------------------------------------------
-    # 分支 B：未绑定强制订阅频道 -> 检查是否开启「需要付费才能解锁」
-    # -------------------------------------------------------------------------
+    # 分支 B：不绑定强制订阅频道时，检查可选项「需要付费才能解锁」
     pay_to_unlock = bool(client.tenant.setting("pay_to_unlock", False))
     if pay_to_unlock:
         expire_seconds = int(client.tenant.setting("pay_unlock_expire", 0) or 0)
-        is_unlocked = await store.is_paid_unlocked(
+        return await _store_is_paid_unlocked(
             tenant_id, user_id, expire_seconds=expire_seconds
         )
-        return is_unlocked
 
     return True
 
 
 async def send_force_sub_prompt(client: Any, message: Any) -> None:
-    """
-    统一拦截提示分发器：
-    - 若未绑定强制订阅频道且开启了 `pay_to_unlock`，展示多方式付费解锁面板；
-    - 若绑定了强制订阅频道，展示频道加入按钮，并在开启 `force_sub_require_msg` 时明确提示用户在频道内发送一条任意消息。
-    """
     channels = [int(ch) for ch in client.tenant.setting("force_sub_channels", []) if ch]
     pay_to_unlock = bool(client.tenant.setting("pay_to_unlock", False))
 
@@ -167,7 +470,7 @@ async def send_force_sub_prompt(client: Any, message: Any) -> None:
     user = message.from_user
     tenant_id = client.tenant.tenant_id
     require_msg = bool(client.tenant.setting("force_sub_require_msg", False))
-    fsub_status = await store.get_force_sub_status(tenant_id, user.id)
+    fsub_status = await _store_get_force_sub_status(tenant_id, user.id)
     msg_sent_channels = {int(c) for c in fsub_status.get("msg_sent_channels", [])}
 
     buttons: list[list[InlineKeyboardButton]] = []
@@ -184,32 +487,32 @@ async def send_force_sub_prompt(client: Any, message: Any) -> None:
             btn_label = f"📢 加入频道 {index}"
         buttons.append([InlineKeyboardButton(btn_label, url=link)])
 
-    start_arg = ""
     if getattr(message, "command", None) and len(message.command) > 1:
-        start_arg = message.command[1]
-    elif getattr(message, "text", None) and not message.text.startswith("/"):
-        start_arg = message.text.strip()
-
-    retry_url = (
-        f"https://t.me/{client.username}?start={start_arg}"
-        if start_arg
-        else f"https://t.me/{client.username}?start=check"
-    )
-    buttons.append([InlineKeyboardButton("🔄 我已完成，点击重试", url=retry_url)])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "🔄 重试",
+                    url=f"https://t.me/{client.username}?start={message.command[1]}",
+                )
+            ]
+        )
+    else:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "🔄 重试",
+                    url=f"https://t.me/{client.username}?start=check",
+                )
+            ]
+        )
 
     if not buttons:
         await message.reply("⚠️ 管理员尚未正确配置强制加入频道。", quote=True)
         return
 
-    base_template = str(
-        client.tenant.setting(
-            "force_sub_message",
-            "你好 {first}\n\n<b>使用本机器人前，请先完成以下频道订阅要求：</b>",
-        )
-    )
-    text = base_template.format(
-        first=user.first_name or "",
-        last=user.last_name or "",
+    text = str(client.tenant.setting("force_sub_message")).format(
+        first=user.first_name,
+        last=user.last_name,
         username=None if not user.username else "@" + user.username,
         mention=user.mention,
         id=user.id,
@@ -219,7 +522,7 @@ async def send_force_sub_prompt(client: Any, message: Any) -> None:
         extra_prompt = str(
             client.tenant.setting(
                 "force_sub_msg_prompt",
-                "\n\n💬 <b>发言解锁要求：</b>加入上述频道/关联群组后，请在其中<b>发送任意一条消息</b>，随后点击下方「🔄 我已完成，点击重试」即可解锁。",
+                "\n\n💬 <b>附加解锁条件：</b>加入后，请在该频道/关联讨论群内<b>发送一条任意消息</b>，随后点击下方「🔄 重试」即可解锁。",
             )
         )
         text = f"{text}{extra_prompt}"
@@ -236,11 +539,12 @@ async def send_pay_unlock_prompt(
     client: Any, message: Any, start_arg: str | None = None
 ) -> None:
     """
-    当未绑定强制订阅频道且启用 `pay_to_unlock` 时，向用户发送支持多种支付方式的付费解锁面板：
-    1. Telegram Stars 官方星币直付（自动回调秒解锁）
-    2. USDT (TRC20 / BEP20) 链上转账 + 交易哈希核验
-    3. 外部收银台 / 聚合支付跳转（微信 / 支付宝 / Stripe / 发卡网）
-    4. 卡密 / 激活码 (CDKey) 直接兑换解锁
+    当不绑定强制订阅频道且开启 `pay_to_unlock` 时，展示付费解锁面板。
+    每种付费方式均为独立可选项（由各自的布尔开关控制）：
+      1. pay_enable_stars   : 是否启用 Telegram Stars 支付
+      2. pay_enable_usdt    : 是否启用 USDT 转账核销
+      3. pay_enable_cashier : 是否启用第三方在线收银台跳转
+      4. pay_enable_cdkey   : 是否启用卡密 / 激活码兑换
     """
     user = message.from_user
     if start_arg is None:
@@ -251,18 +555,23 @@ async def send_pay_unlock_prompt(
         else:
             start_arg = ""
 
-    stars_amount = int(client.tenant.setting("pay_amount_stars", 0) or 0)
-    usdt_amount = str(client.tenant.setting("pay_amount_usdt", "") or "").strip()
+    enable_stars = bool(client.tenant.setting("pay_enable_stars", False))
+    stars_amount = int(client.tenant.setting("pay_amount_stars", 50) or 0)
+
+    enable_usdt = bool(client.tenant.setting("pay_enable_usdt", False))
+    usdt_amount = str(client.tenant.setting("pay_amount_usdt", "5.00") or "").strip()
     usdt_address = str(client.tenant.setting("pay_usdt_address", "") or "").strip()
     usdt_network = str(client.tenant.setting("pay_usdt_network", "TRC20") or "TRC20").strip()
+
+    enable_cashier = bool(client.tenant.setting("pay_enable_cashier", False))
     custom_url = str(client.tenant.setting("pay_custom_url", "") or "").strip()
+
     enable_cdkey = bool(client.tenant.setting("pay_enable_cdkey", True))
     expire_seconds = int(client.tenant.setting("pay_unlock_expire", 0) or 0)
 
     buttons: list[list[InlineKeyboardButton]] = []
 
-    # 方式 1：Telegram Stars 原生支付
-    if stars_amount > 0:
+    if enable_stars and stars_amount > 0:
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -272,8 +581,7 @@ async def send_pay_unlock_prompt(
             ]
         )
 
-    # 方式 2：USDT 加密货币转账
-    if usdt_amount and usdt_address:
+    if enable_usdt and usdt_amount and usdt_address:
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -283,8 +591,7 @@ async def send_pay_unlock_prompt(
             ]
         )
 
-    # 方式 3：第三方在线收银台 / 聚合支付链接
-    if custom_url:
+    if enable_cashier and custom_url:
         formatted_url = (
             custom_url.replace("{user_id}", str(user.id))
             .replace("{tenant_id}", quote_plus(str(client.tenant.tenant_id)))
@@ -294,7 +601,6 @@ async def send_pay_unlock_prompt(
             [InlineKeyboardButton("💳 在线收银台支付 (微信/支付宝/发卡)", url=formatted_url)]
         )
 
-    # 方式 4：卡密 / 激活码兑换
     if enable_cdkey:
         buttons.append(
             [
@@ -305,13 +611,19 @@ async def send_pay_unlock_prompt(
             ]
         )
 
-    retry_cb = f"pay_check:{start_arg[:32]}"
-    buttons.append([InlineKeyboardButton("🔄 我已完成支付，点击验证状态", callback_data=retry_cb)])
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                "🔄 我已完成支付，点击验证状态",
+                callback_data=f"pay_check:{start_arg[:32]}",
+            )
+        ]
+    )
 
     base_msg = str(
         client.tenant.setting(
             "pay_unlock_message",
-            "🔒 <b>当前资源需付费解锁后访问</b>\n\n请选择以下任意一种方式完成解锁：",
+            "🔒 <b>当前资源需付费解锁后访问</b>\n\n请选择以下任意一种已启用的方式完成解锁：",
         )
     ).format(
         first=user.first_name or "",
@@ -335,6 +647,10 @@ async def send_pay_unlock_prompt(
         disable_web_page_preview=True,
     )
 
+
+# ==============================================================================
+# 3. 原版辅助函数（100% 保持原版签名与行为）
+# ==============================================================================
 
 async def get_verify_status(client: Any, user_id: int) -> dict[str, Any]:
     return await store.get_verify_status(client.tenant.tenant_id, user_id)
@@ -400,13 +716,42 @@ def parse_buttons(value: str) -> list[list[InlineKeyboardButton]]:
     return rows
 
 
-def encode(string_val: str) -> str:
-    return base64.urlsafe_b64encode(string_val.encode("utf-8")).decode("ascii").rstrip("=")
+async def encode(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode("ascii")).decode("ascii").strip("=")
 
 
-def decode(base64_string: str) -> str:
-    padding = "=" * (-len(base64_string) % 4)
-    return base64.urlsafe_b64decode((base64_string + padding).encode("ascii")).decode("utf-8")
+async def decode(value: str) -> str:
+    padded = value.strip("=") + "=" * (-len(value.strip("=")) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii")).decode("ascii")
+
+
+def generate_share_code(length: int = 8) -> str:
+    chars = string.ascii_letters + string.digits
+    return "".join(secrets.choice(chars) for _ in range(int(length)))
+
+
+async def get_messages(client: Any, message_ids: list[int]) -> list[Any]:
+    return await fetch_messages(client, message_ids)
+
+
+async def get_message_id(client: Any, message: Any) -> int:
+    if message.forward_origin and isinstance(message.forward_origin, MessageOriginChannel):
+        if message.forward_origin.chat.id == client.db_channel.id:
+            return message.forward_origin.message_id
+        return 0
+    if message.forward_origin:
+        return 0
+    if not message.text:
+        return 0
+    match = re.match(r"https://t.me/(?:c/)?(.*)/(\d+)", message.text)
+    if not match:
+        return 0
+    channel_id, message_id = match.group(1), int(match.group(2))
+    if channel_id.isdigit() and f"-100{channel_id}" == str(client.db_channel.id):
+        return message_id
+    if channel_id == client.db_channel.username:
+        return message_id
+    return 0
 
 
 admin_only = filters.create(is_admin)
