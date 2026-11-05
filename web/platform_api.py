@@ -1,33 +1,22 @@
-"""Platform-administrator tenant lifecycle API."""
+"""Administrator control plane API for managing all tenants' settings, data, and admin configuration."""
 
 from __future__ import annotations
 
 import logging
 import re
-import secrets
 from datetime import datetime
 from typing import Any
 
-import aiohttp
 from aiohttp import web
-from pymongo.errors import DuplicateKeyError
 
 from config import CONFIG, parse_bool
 from database.database import store
-from security import TenantCrypto, hash_password
-from web.auth import (
-    MAX_LOGIN_PASSWORD_LENGTH,
-    PRINCIPAL_KEY,
-    audit_request,
-    require_platform,
-)
+from security import TenantCrypto, hash_password, mask_bot_token
+from tenant import TenantContext
+from web.auth import MAX_LOGIN_PASSWORD_LENGTH, PRINCIPAL_KEY, AuthPrincipal, audit_request, require_platform
+from web.tenant_api import EXTRA_SETTING_DEFAULTS, normalize_settings
 
 logger = logging.getLogger(__name__)
-SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$")
-
-
-class ValidationFailure(Exception):
-    pass
 
 
 def _crypto() -> TenantCrypto:
@@ -35,331 +24,353 @@ def _crypto() -> TenantCrypto:
 
 
 def _json_value(value: Any) -> Any:
-    return value.isoformat() if isinstance(value, datetime) else value
-
-
-def _tenant_public(document: dict[str, Any], runtime: dict[str, Any] | None) -> dict[str, Any]:
-    return {
-        "id": str(document["_id"]),
-        "slug": document["slug"],
-        "display_name": document.get("display_name", document["slug"]),
-        "enabled": bool(document.get("enabled", False)),
-        "bot_token_hint": document.get("bot_token_hint", ""),
-        "bot_username": (runtime or {}).get("bot_username") or document.get("bot_username", ""),
-        "owner_id": document.get("owner_id"),
-        "admin_ids": document.get("admin_ids", []),
-        "db_channel_id": document.get("db_channel_id"),
-        "config_version": document.get("config_version", 1),
-        "created_at": document.get("created_at", 0),
-        "updated_at": document.get("updated_at", 0),
-        "runtime": {
-            "status": (runtime or {}).get("status", "stopped"),
-            "worker_id": (runtime or {}).get("worker_id", ""),
-            "generation": (runtime or {}).get("generation", 0),
-            "heartbeat_at": _json_value((runtime or {}).get("heartbeat_at")),
-            "expires_at": _json_value((runtime or {}).get("expires_at")),
-            "last_error": (runtime or {}).get("last_error", ""),
-        },
-    }
-
-
-async def validate_bot_configuration(token: str, channel_id: int) -> dict[str, Any]:
-    timeout = aiohttp.ClientTimeout(total=15)
-    base = f"https://api.telegram.org/bot{token}"
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-
-        async def call(method: str, **params: Any) -> dict[str, Any]:
-            try:
-                async with session.post(f"{base}/{method}", json=params) as response:
-                    data = await response.json(content_type=None)
-            except (aiohttp.ClientError, TimeoutError) as exc:
-                raise ValidationFailure("Telegram API is unavailable") from exc
-            if not response.ok or not data.get("ok"):
-                description = str(data.get("description") or "Telegram rejected the request")
-                raise ValidationFailure(description[:200])
-            return data["result"]
-
-        bot = await call("getMe")
-        chat = await call("getChat", chat_id=int(channel_id))
-        membership = await call("getChatMember", chat_id=int(channel_id), user_id=int(bot["id"]))
-        allowed = {"creator", "administrator"}
-        if chat.get("type") != "channel":
-            allowed.add("member")
-        if membership.get("status") not in allowed:
-            raise ValidationFailure("Bot does not have sufficient database-channel access")
-        return {"id": bot["id"], "username": bot.get("username", "")}
-
-
-def _required_text(data: dict[str, Any], key: str) -> str:
-    value = str(data.get(key) or "").strip()
-    if not value:
-        raise ValidationFailure(f"{key} is required")
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (frozenset, set, tuple)):
+        return list(value)
     return value
 
 
-def _new_tenant_password() -> str:
-    return secrets.token_urlsafe(18)
+def _tenant_public(
+    document: dict[str, Any],
+    runtime: dict[str, Any] | None = None,
+    counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    ctx = TenantContext.from_document(document)
+    merged_settings = dict(EXTRA_SETTING_DEFAULTS)
+    merged_settings.update(ctx.settings)
+    merged_settings.update(document.get("settings") or {})
+
+    rt_info: dict[str, Any] = {
+        "worker_id": runtime.get("worker_id", "") if runtime else "",
+        "status": runtime.get("status", "stopped") if runtime else "stopped",
+        "last_error": runtime.get("last_error", "") if runtime else "",
+        "bot_username": (runtime.get("bot_username") if runtime else "") or document.get("bot_username", ""),
+    }
+    c = counts or {}
+    return {
+        "id": ctx.tenant_id,
+        "slug": ctx.slug,
+        "display_name": ctx.display_name,
+        "enabled": bool(document.get("enabled", False)),
+        "bot_username": document.get("bot_username", ""),
+        "bot_token_hint": document.get("bot_token_hint", ""),
+        "has_bot_token": bool(document.get("bot_token_ciphertext")),
+        "owner_id": ctx.owner_id,
+        "admin_ids": sorted(ctx.admin_ids),
+        "db_channel_id": ctx.db_channel_id,
+        "settings": {k: _json_value(v) for k, v in merged_settings.items()},
+        "config_version": ctx.config_version,
+        "runtime": rt_info,
+        "counts": {
+            "users": c.get("users", 0),
+            "shares": c.get("shares", 0),
+            "banned": c.get("banned", 0),
+            "cdkeys": c.get("cdkeys", 0),
+        },
+        "created_at": _json_value(document.get("created_at")),
+        "updated_at": _json_value(document.get("updated_at")),
+    }
 
 
-def setup_platform_routes(app: web.Application) -> None:
-    app.router.add_get("/api/platform/tenants", api_tenants)
-    app.router.add_post("/api/platform/tenants", api_tenant_create)
-    app.router.add_get("/api/platform/tenants/{tenant_id}", api_tenant_detail)
-    app.router.add_patch("/api/platform/tenants/{tenant_id}", api_tenant_update)
-    app.router.add_post("/api/platform/tenants/{tenant_id}/enable", api_tenant_enable)
-    app.router.add_post("/api/platform/tenants/{tenant_id}/disable", api_tenant_disable)
-    app.router.add_post("/api/platform/tenants/{tenant_id}/reset-password", api_tenant_password)
-    app.router.add_post("/api/platform/tenants/{tenant_id}/restart", api_tenant_restart)
-    app.router.add_post("/api/platform/tenants/{tenant_id}/impersonate", api_tenant_impersonate)
-    app.router.add_get("/api/platform/audit", api_platform_audit)
-    app.router.add_get("/api/platform/jobs/{job_id}", api_platform_job)
+@require_platform
+async def api_admin_config_get(request: web.Request) -> web.Response:
+    cfg = await store.get_admin_config()
+    return web.json_response(
+        {
+            "admin_id": cfg.get("admin_id", "admin"),
+            "admin_path": cfg.get("admin_path", "admin"),
+        }
+    )
+
+
+@require_platform
+async def api_admin_config_update(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    if not isinstance(data, dict):
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    admin_id = str(data.get("admin_id") or "").strip() if "admin_id" in data else None
+    new_password = str(data.get("password") or "") if "password" in data else None
+    admin_path = str(data.get("admin_path") or "").strip().strip("/") if "admin_path" in data else None
+
+    if admin_id is not None and (len(admin_id) < 1 or len(admin_id) > 64):
+        return web.json_response({"error": "管理员登录 ID 长度需在 1 到 64 位之间"}, status=400)
+
+    if new_password is not None and new_password != "":
+        if len(new_password) < 1 or len(new_password) > MAX_LOGIN_PASSWORD_LENGTH:
+            return web.json_response({"error": "管理员密码长度不合法"}, status=400)
+
+    if admin_path is not None:
+        cleaned = re.sub(r"[^a-zA-Z0-9_-]", "", admin_path)
+        if not cleaned or cleaned.lower() in {"api", "static", "health", "kaithhealthcheck", "kaithheathcheck"}:
+            return web.json_response(
+                {"error": "后台路径后缀仅支持字母、数字、下划线或连字符，且不能为系统保留路径"},
+                status=400,
+            )
+        admin_path = cleaned
+
+    updated = await store.update_admin_config(
+        admin_id=admin_id,
+        new_password=new_password if (new_password and new_password != "") else None,
+        admin_path=admin_path,
+    )
+    await audit_request(
+        request,
+        "admin.config_update",
+        metadata={
+            "admin_id": updated.get("admin_id"),
+            "admin_path": updated.get("admin_path"),
+            "password_changed": bool(new_password),
+        },
+    )
+    return web.json_response(
+        {
+            "success": True,
+            "admin_id": updated.get("admin_id", "admin"),
+            "admin_path": updated.get("admin_path", "admin"),
+        }
+    )
 
 
 @require_platform
 async def api_tenants(request: web.Request) -> web.Response:
-    documents = await store.list_tenants()
-    result = []
-    for document in documents:
-        runtime = await store.get_tenant_runtime(str(document["_id"]))
-        result.append(_tenant_public(document, runtime))
-    return web.json_response({"tenants": result, "total": len(result)})
+    enabled_param = request.query.get("enabled")
+    enabled_filter = parse_bool(enabled_param) if enabled_param is not None else None
+    docs = await store.list_tenants(enabled=enabled_filter)
+
+    items: list[dict[str, Any]] = []
+    for doc in docs:
+        tid = str(doc["_id"])
+        runtime = await store.get_tenant_runtime(tid)
+        u_cnt = await store.get_user_count(tid)
+        s_cnt = await store.get_total_shares(tid)
+        b_cnt = await store.get_banned_count(tid)
+        c_cnt = await store.database["cdkeys"].count_documents({"tenant_id": tid})
+        items.append(
+            _tenant_public(
+                doc,
+                runtime=runtime,
+                counts={"users": u_cnt, "shares": s_cnt, "banned": b_cnt, "cdkeys": c_cnt},
+            )
+        )
+    return web.json_response({"tenants": items, "total": len(items)})
 
 
 @require_platform
 async def api_tenant_detail(request: web.Request) -> web.Response:
-    document = await store.get_tenant(request.match_info["tenant_id"])
-    if not document:
+    tid = request.match_info["tenant_id"]
+    doc = await store.get_tenant(tid)
+    if not doc:
         return web.json_response({"error": "Tenant not found"}, status=404)
-    runtime = await store.get_tenant_runtime(str(document["_id"]))
-    return web.json_response(_tenant_public(document, runtime))
-
-
-@require_platform
-async def api_tenant_create(request: web.Request) -> web.Response:
-    try:
-        data = await request.json()
-        slug = _required_text(data, "slug").lower()
-        if not SLUG_PATTERN.fullmatch(slug):
-            raise ValidationFailure("slug must contain 3-32 lowercase letters, digits or hyphens")
-        display_name = _required_text(data, "display_name")
-        token = _required_text(data, "bot_token")
-        password_supplied = bool(str(data.get("web_password") or "").strip())
-        password = str(data.get("web_password") or "").strip() or _new_tenant_password()
-        if not 12 <= len(password) <= MAX_LOGIN_PASSWORD_LENGTH:
-            raise ValidationFailure("web_password must contain 12-1024 characters")
-        owner_id = int(data["owner_id"])
-        db_channel_id = int(data["db_channel_id"])
-        admin_ids = [int(value) for value in data.get("admin_ids", [])]
-        identity = await validate_bot_configuration(token, db_channel_id)
-        document = await store.create_tenant(
-            slug=slug,
-            display_name=display_name,
-            bot_token=token,
-            owner_id=owner_id,
-            admin_ids=admin_ids,
-            db_channel_id=db_channel_id,
-            web_password=password,
-            crypto=_crypto(),
-            enabled=parse_bool(data.get("enabled", False)),
-            bot_username=identity["username"],
+    runtime = await store.get_tenant_runtime(tid)
+    u_cnt = await store.get_user_count(tid)
+    s_cnt = await store.get_total_shares(tid)
+    b_cnt = await store.get_banned_count(tid)
+    c_cnt = await store.database["cdkeys"].count_documents({"tenant_id": tid})
+    return web.json_response(
+        _tenant_public(
+            doc,
+            runtime=runtime,
+            counts={"users": u_cnt, "shares": s_cnt, "banned": b_cnt, "cdkeys": c_cnt},
         )
-    except ValidationFailure as exc:
-        return web.json_response({"error": str(exc)}, status=422)
-    except (KeyError, TypeError, ValueError):
-        return web.json_response({"error": "Invalid tenant fields"}, status=400)
-    except DuplicateKeyError:
-        return web.json_response({"error": "Tenant slug already exists"}, status=409)
-    except Exception:
-        logger.exception("Tenant creation failed")
-        return web.json_response({"error": "Tenant creation failed"}, status=500)
-
-    await audit_request(request, "tenant.create", tenant_id=str(document["_id"]), target=slug)
-    response = _tenant_public(document, None)
-    if not password_supplied:
-        response["temporary_password"] = password
-    return web.json_response(response, status=201)
+    )
 
 
 @require_platform
 async def api_tenant_update(request: web.Request) -> web.Response:
-    tenant_id = request.match_info["tenant_id"]
-    current = await store.get_tenant(tenant_id)
-    if not current:
+    tid = request.match_info["tenant_id"]
+    doc = await store.get_tenant(tid)
+    if not doc:
         return web.json_response({"error": "Tenant not found"}, status=404)
+
     try:
         data = await request.json()
-        updates: dict[str, Any] = {}
-        if "display_name" in data:
-            updates["display_name"] = _required_text(data, "display_name")
-        if "owner_id" in data:
-            updates["owner_id"] = int(data["owner_id"])
-        if "admin_ids" in data:
-            updates["admin_ids"] = list(
-                dict.fromkeys(
-                    [
-                        int(data.get("owner_id", current["owner_id"])),
-                        *(int(x) for x in data["admin_ids"]),
-                    ]
-                )
-            )
-        elif "owner_id" in updates:
-            updates["admin_ids"] = list(
-                dict.fromkeys([updates["owner_id"], *current.get("admin_ids", [])])
-            )
-        if "db_channel_id" in data:
-            updates["db_channel_id"] = int(data["db_channel_id"])
-
-        token = str(data.get("bot_token") or "").strip()
-        channel_changed = "db_channel_id" in updates
-        if token or channel_changed:
-            effective_token = token or _crypto().decrypt_bot_token(current["bot_token_ciphertext"])
-            effective_channel = int(updates.get("db_channel_id", current["db_channel_id"]))
-            identity = await validate_bot_configuration(effective_token, effective_channel)
-            updates["bot_username"] = identity["username"]
-            if token:
-                updates["bot_token_ciphertext"] = _crypto().encrypt_bot_token(token)
-                from security import mask_bot_token
-
-                updates["bot_token_hint"] = mask_bot_token(token)
-        document = await store.update_tenant_core(tenant_id, updates)
-    except ValidationFailure as exc:
-        return web.json_response({"error": str(exc)}, status=422)
-    except (TypeError, ValueError):
-        return web.json_response({"error": "Invalid tenant fields"}, status=400)
     except Exception:
-        logger.exception("Tenant update failed")
-        return web.json_response({"error": "Tenant update failed"}, status=500)
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    if not isinstance(data, dict):
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    core_updates: dict[str, Any] = {}
+    if "slug" in data and str(data["slug"]).strip():
+        new_slug = str(data["slug"]).strip().lower()
+        if new_slug != doc.get("slug"):
+            existing = await store.get_tenant_by_slug(new_slug)
+            if existing and str(existing["_id"]) != tid:
+                return web.json_response({"error": "该租户账号标识已被占用"}, status=409)
+            core_updates["slug"] = new_slug
+
+    if "display_name" in data and str(data["display_name"]).strip():
+        core_updates["display_name"] = str(data["display_name"]).strip()[:64]
+
+    if "owner_id" in data:
+        try:
+            core_updates["owner_id"] = int(data.get("owner_id") or 0)
+        except (ValueError, TypeError):
+            return web.json_response({"error": "Owner Telegram ID 必须为整数"}, status=400)
+
+    if "db_channel_id" in data:
+        try:
+            core_updates["db_channel_id"] = int(data.get("db_channel_id") or 0)
+        except (ValueError, TypeError):
+            return web.json_response({"error": "数据库存储频道 ID 必须为整数"}, status=400)
+
+    if "admin_ids" in data:
+        raw_admins = data.get("admin_ids")
+        if isinstance(raw_admins, str):
+            raw_admins = [x for x in raw_admins.replace(",", " ").split() if x.strip()]
+        admins_list: list[int] = []
+        eff_owner = int(core_updates.get("owner_id", doc.get("owner_id", 0)) or 0)
+        if eff_owner != 0:
+            admins_list.append(eff_owner)
+        if isinstance(raw_admins, list):
+            for x in raw_admins:
+                try:
+                    val = int(str(x).strip())
+                    if val != 0 and val not in admins_list:
+                        admins_list.append(val)
+                except (ValueError, TypeError):
+                    continue
+        core_updates["admin_ids"] = admins_list
+
+    if "bot_token" in data and str(data.get("bot_token") or "").strip():
+        raw_token = str(data["bot_token"]).strip()
+        crypto = _crypto()
+        core_updates["bot_token_ciphertext"] = crypto.encrypt_bot_token(raw_token)
+        core_updates["bot_token_hint"] = mask_bot_token(raw_token)
+
+    if "bot_username" in data:
+        core_updates["bot_username"] = str(data.get("bot_username") or "").strip().lstrip("@")
+
+    if "web_password" in data and str(data.get("web_password") or "").strip():
+        core_updates["web_password_hash"] = hash_password(str(data["web_password"]))
+
+    if "enabled" in data:
+        core_updates["enabled"] = parse_bool(data.get("enabled"))
+
+    nested_settings = data.get("settings") if isinstance(data.get("settings"), dict) else data
+    try:
+        setting_updates = normalize_settings(nested_settings)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    if core_updates:
+        doc = await store.update_tenant_core(tid, core_updates) or doc
+    if setting_updates:
+        doc = await store.update_tenant_settings(tid, setting_updates) or doc
 
     await audit_request(
         request,
-        "tenant.update",
-        tenant_id=tenant_id,
-        target=current["slug"],
-        metadata={"fields": sorted(updates)},
+        "platform.tenant_update",
+        tenant_id=tid,
+        metadata={"core": sorted(core_updates.keys()), "settings": sorted(setting_updates.keys())},
     )
-    runtime = await store.get_tenant_runtime(tenant_id)
-    return web.json_response(_tenant_public(document, runtime))
+    runtime = await store.get_tenant_runtime(tid)
+    return web.json_response(_tenant_public(doc, runtime=runtime))
 
 
-async def _set_enabled(request: web.Request, enabled: bool) -> web.Response:
-    tenant_id = request.match_info["tenant_id"]
-    current = await store.get_tenant(tenant_id)
-    if not current:
+@require_platform
+async def api_tenant_delete(request: web.Request) -> web.Response:
+    tid = request.match_info["tenant_id"]
+    deleted = await store.delete_tenant(tid)
+    if not deleted:
         return web.json_response({"error": "Tenant not found"}, status=404)
-    if enabled:
-        try:
-            token = _crypto().decrypt_bot_token(current["bot_token_ciphertext"])
-            await validate_bot_configuration(token, int(current["db_channel_id"]))
-        except (ValidationFailure, ValueError) as exc:
-            return web.json_response({"error": str(exc)}, status=422)
-    document = await store.update_tenant_core(tenant_id, {"enabled": enabled})
-    if not enabled:
-        await store.delete_tenant_sessions(tenant_id)
-        await store.cancel_tenant_jobs(tenant_id, "Tenant was disabled")
-    action = "tenant.enable" if enabled else "tenant.disable"
-    await audit_request(request, action, tenant_id=tenant_id, target=current["slug"])
-    runtime = await store.get_tenant_runtime(tenant_id)
-    return web.json_response(_tenant_public(document, runtime))
+    await audit_request(request, "platform.tenant_delete", tenant_id=tid)
+    return web.json_response({"ok": True})
 
 
 @require_platform
 async def api_tenant_enable(request: web.Request) -> web.Response:
-    return await _set_enabled(request, True)
+    tid = request.match_info["tenant_id"]
+    doc = await store.update_tenant_core(tid, {"enabled": True})
+    if not doc:
+        return web.json_response({"error": "Tenant not found"}, status=404)
+    runtime = await store.get_tenant_runtime(tid)
+    await audit_request(request, "platform.tenant_enable", tenant_id=tid)
+    return web.json_response({"ok": True, "tenant": _tenant_public(doc, runtime=runtime)})
 
 
 @require_platform
 async def api_tenant_disable(request: web.Request) -> web.Response:
-    return await _set_enabled(request, False)
-
-
-@require_platform
-async def api_tenant_password(request: web.Request) -> web.Response:
-    tenant_id = request.match_info["tenant_id"]
-    tenant = await store.get_tenant(tenant_id)
-    if not tenant:
+    tid = request.match_info["tenant_id"]
+    doc = await store.update_tenant_core(tid, {"enabled": False})
+    if not doc:
         return web.json_response({"error": "Tenant not found"}, status=404)
-    try:
-        data = await request.json()
-        password = _required_text(data, "web_password")
-        if not 12 <= len(password) <= MAX_LOGIN_PASSWORD_LENGTH:
-            raise ValidationFailure("web_password must contain 12-1024 characters")
-    except ValidationFailure as exc:
-        return web.json_response({"error": str(exc)}, status=422)
-    except Exception:
-        return web.json_response({"error": "Invalid JSON"}, status=400)
-    await store.update_tenant_core(tenant_id, {"web_password_hash": hash_password(password)})
-    await store.delete_tenant_sessions(tenant_id)
-    await audit_request(
-        request, "tenant.password_reset", tenant_id=tenant_id, target=tenant["slug"]
-    )
-    return web.json_response({"success": True})
+    await store.cancel_tenant_jobs(tid, "Tenant disabled")
+    runtime = await store.get_tenant_runtime(tid)
+    await audit_request(request, "platform.tenant_disable", tenant_id=tid)
+    return web.json_response({"ok": True, "tenant": _tenant_public(doc, runtime=runtime)})
 
 
 @require_platform
 async def api_tenant_restart(request: web.Request) -> web.Response:
-    tenant_id = request.match_info["tenant_id"]
-    tenant = await store.get_tenant(tenant_id)
-    if not tenant:
+    tid = request.match_info["tenant_id"]
+    doc = await store.get_tenant(tid)
+    if not doc:
         return web.json_response({"error": "Tenant not found"}, status=404)
-    if not tenant.get("enabled"):
-        return web.json_response({"error": "Disabled tenant cannot be restarted"}, status=409)
-    principal = request[PRINCIPAL_KEY]
+    principal: AuthPrincipal = request[PRINCIPAL_KEY]
     job = await store.create_job(
-        tenant_id=tenant_id,
+        tenant_id=tid,
         job_type="bot_restart",
         payload={},
         actor={"role": principal.actor_role, "id": principal.actor_id},
-        idempotency_key=request.headers.get("Idempotency-Key"),
     )
-    await audit_request(
-        request,
-        "tenant.restart",
-        tenant_id=tenant_id,
-        target=tenant["slug"],
-        metadata={"job_id": job["_id"]},
-    )
-    return web.json_response({"success": True, "job_id": job["_id"]}, status=202)
-
-
-@require_platform
-async def api_tenant_impersonate(request: web.Request) -> web.Response:
-    tenant_id = request.match_info["tenant_id"]
-    tenant = await store.get_tenant(tenant_id)
-    if not tenant:
-        return web.json_response({"error": "Tenant not found"}, status=404)
-    principal = request[PRINCIPAL_KEY]
-    token = await store.create_session(
-        role="tenant",
-        tenant_id=tenant_id,
-        actor_role="platform",
-        actor_id=principal.actor_id,
-        impersonated=True,
-        expires_in=min(CONFIG.session_expire_seconds, 3600),
-    )
-    await audit_request(request, "tenant.impersonate", tenant_id=tenant_id, target=tenant["slug"])
-    return web.json_response({"success": True, "token": token, "tenant_id": tenant_id})
+    await audit_request(request, "platform.tenant_restart", tenant_id=tid)
+    return web.json_response({"job_id": job["_id"], "state": job["state"]})
 
 
 @require_platform
 async def api_platform_audit(request: web.Request) -> web.Response:
-    page = max(1, int(request.query.get("page", 1)))
-    per_page = min(100, max(1, int(request.query.get("per_page", 50))))
-    total = await store.audit_logs.count_documents({})
-    cursor = (
-        store.audit_logs.find({}, {"_id": 0})
-        .sort("created_at", -1)
-        .skip((page - 1) * per_page)
-        .limit(per_page)
-    )
-    entries = [document async for document in cursor]
-    return web.json_response({"entries": entries, "total": total, "page": page})
+    try:
+        limit = max(1, min(500, int(request.query.get("limit", "100"))))
+    except ValueError:
+        limit = 100
+    tid = (request.query.get("tenant_id") or "").strip()
+    query: dict[str, Any] = {}
+    if tid:
+        query["tenant_id"] = tid
+    cursor = store.audit_logs.find(query).sort("created_at", -1).limit(limit)
+    docs = await cursor.to_list(length=limit)
+    logs: list[dict[str, Any]] = []
+    for d in docs:
+        logs.append(
+            {
+                "id": str(d.get("_id", "")),
+                "action": d.get("action", ""),
+                "actor_role": d.get("actor_role", ""),
+                "actor_id": d.get("actor_id", ""),
+                "tenant_id": d.get("tenant_id"),
+                "target": d.get("target", ""),
+                "metadata": d.get("metadata") or {},
+                "remote_ip": d.get("remote_ip", ""),
+                "created_at": _json_value(d.get("created_at")),
+            }
+        )
+    return web.json_response({"logs": logs})
 
 
 @require_platform
 async def api_platform_job(request: web.Request) -> web.Response:
-    job = await store.get_platform_job(request.match_info["job_id"])
+    job_id = request.match_info["job_id"]
+    job = await store.get_job(job_id)
     if not job:
         return web.json_response({"error": "Job not found"}, status=404)
-    result = {key: _json_value(value) for key, value in job.items() if key != "_id"}
-    result["id"] = str(job["_id"])
-    return web.json_response(result)
+    return web.json_response({k: _json_value(v) for k, v in job.items() if k != "_id"} | {"id": str(job["_id"])})
+
+
+def setup_platform_routes(app: web.Application) -> None:
+    app.router.add_get("/api/admin/config", api_admin_config_get)
+    app.router.add_put("/api/admin/config", api_admin_config_update)
+    app.router.add_get("/api/platform/tenants", api_tenants)
+    app.router.add_get("/api/platform/tenants/{tenant_id}", api_tenant_detail)
+    app.router.add_patch("/api/platform/tenants/{tenant_id}", api_tenant_update)
+    app.router.add_put("/api/platform/tenants/{tenant_id}", api_tenant_update)
+    app.router.add_delete("/api/platform/tenants/{tenant_id}", api_tenant_delete)
+    app.router.add_post("/api/platform/tenants/{tenant_id}/enable", api_tenant_enable)
+    app.router.add_post("/api/platform/tenants/{tenant_id}/disable", api_tenant_disable)
+    app.router.add_post("/api/platform/tenants/{tenant_id}/restart", api_tenant_restart)
+    app.router.add_get("/api/platform/audit", api_platform_audit)
+    app.router.add_get("/api/platform/jobs/{job_id}", api_platform_job)

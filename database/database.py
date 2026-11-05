@@ -1,24 +1,17 @@
-"""MongoDB persistence with mandatory tenant scoping.
-
-All business-data methods take ``tenant_id`` as their first argument. Platform
-collections (tenants, sessions, leases, jobs, audit logs) are intentionally
-separate and expose explicit platform methods.
-"""
+"""MongoDB storage layer using Motor (asyncio)."""
 
 from __future__ import annotations
 
 import logging
 import re
-import secrets
-import string
 import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import motor.motor_asyncio
-from pymongo import ASCENDING, DESCENDING, ReturnDocument
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from config import CONFIG, tenant_defaults
@@ -28,9 +21,12 @@ from security import (
     hash_password,
     mask_bot_token,
     token_digest,
+    verify_password,
+    verify_plain_secret,
 )
 
 logger = logging.getLogger(__name__)
+
 SCHEMA_VERSION = 2
 TERMINAL_JOB_STATES = {"completed", "failed", "cancelled"}
 EMPTY_STRING = ""
@@ -44,10 +40,16 @@ def timestamp() -> float:
     return time.time()
 
 
+def _create_client() -> AsyncIOMotorClient:
+    uri = CONFIG.database_url or "mongodb://localhost:27017"
+    return AsyncIOMotorClient(uri)
+
+
 class MongoStore:
     def __init__(self, client: Any, database_name: str):
         self.client = client
         self.database = client[database_name]
+        self.db = self.database
         self.tenants = self.database["tenants"]
         self.users = self.database["users"]
         self.shares = self.database["shares"]
@@ -61,37 +63,24 @@ class MongoStore:
 
     async def ping(self) -> bool:
         try:
-            await self.client.admin.command("ping")
+            await self.database.command("ping")
             return True
-        except Exception as exc:
-            logger.error("Database ping failed: %s", exc)
+        except Exception:
             return False
 
     async def ensure_schema(self) -> None:
-        marker = await self.metadata.find_one({"_id": "schema"})
-        if marker:
-            version = int(marker.get("version", 0))
+        doc = await self.metadata.find_one({"_id": "schema"})
+        if doc is not None:
+            version = doc.get("version")
             if version != SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"Unsupported database schema {version}; expected {SCHEMA_VERSION}"
-                )
+                raise RuntimeError(f"Unsupported database schema {version}; expected {SCHEMA_VERSION}")
             return
-
-        legacy_collections = []
-        for name, collection in (
-            ("users", self.users),
-            ("shares", self.shares),
-            ("banned_users", self.banned_users),
-            ("bot_stats", self.stats),
-        ):
-            if await collection.find_one({"tenant_id": {"$exists": False}}):
-                legacy_collections.append(name)
-        if legacy_collections:
-            names = ", ".join(legacy_collections)
-            raise RuntimeError(
-                "Legacy single-tenant data detected in "
-                f"{names}. Run scripts/reset_schema.py explicitly before startup."
-            )
+        for coll in (self.users, self.shares, self.banned_users, self.stats):
+            legacy = await coll.find_one({"tenant_id": {"$exists": False}})
+            if legacy is not None:
+                raise RuntimeError(
+                    "Legacy single-tenant data detected; run scripts/reset_schema.py first."
+                )
         try:
             await self.metadata.update_one(
                 {"_id": "schema"},
@@ -99,52 +88,104 @@ class MongoStore:
                 upsert=True,
             )
         except DuplicateKeyError:
-            # Web and worker roles can initialize an empty database together.
-            marker = await self.metadata.find_one({"_id": "schema"})
-            if not marker or int(marker.get("version", 0)) != SCHEMA_VERSION:
-                raise
+            pass
 
     async def create_indexes(self) -> None:
         await self.ensure_schema()
-        await self.tenants.create_index("slug", unique=True)
-        await self.users.create_index(
-            [("tenant_id", ASCENDING), ("user_id", ASCENDING)], unique=True
-        )
-        await self.users.create_index([("tenant_id", ASCENDING), ("joined_at", DESCENDING)])
-        await self.shares.create_index([("tenant_id", ASCENDING), ("code", ASCENDING)], unique=True)
-        await self.shares.create_index(
-            [("tenant_id", ASCENDING), ("owner_id", ASCENDING), ("created_at", DESCENDING)]
-        )
-        await self.shares.create_index([("tenant_id", ASCENDING), ("message_ids", ASCENDING)])
-        await self.shares.create_index([("tenant_id", ASCENDING), ("keywords", ASCENDING)])
-        await self.banned_users.create_index(
-            [("tenant_id", ASCENDING), ("user_id", ASCENDING)], unique=True
-        )
-        await self.stats.create_index([("tenant_id", ASCENDING), ("key", ASCENDING)], unique=True)
-        await self.sessions.create_index("expires_at", expireAfterSeconds=0)
-        await self.leases.create_index("tenant_id", unique=True)
-        await self.leases.create_index("expires_at", expireAfterSeconds=0)
+        await self.tenants.create_index([("slug", 1)], unique=True)
+        await self.users.create_index([("tenant_id", 1), ("user_id", 1)], unique=True)
+        await self.users.create_index([("tenant_id", 1), ("joined_at", -1)])
+        await self.shares.create_index([("tenant_id", 1), ("code", 1)], unique=True)
+        await self.shares.create_index([("tenant_id", 1), ("owner_id", 1), ("created_at", -1)])
+        await self.shares.create_index([("tenant_id", 1), ("message_ids", 1)])
+        await self.shares.create_index([("tenant_id", 1), ("keywords", 1)])
+        await self.banned_users.create_index([("tenant_id", 1), ("user_id", 1)], unique=True)
+        await self.stats.create_index([("tenant_id", 1), ("key", 1)], unique=True)
+        await self.sessions.create_index([("expires_at", 1)], expireAfterSeconds=0)
+        await self.leases.create_index([("tenant_id", 1)], unique=True)
+        await self.leases.create_index([("expires_at", 1)], expireAfterSeconds=0)
+        await self.jobs.create_index([("state", 1), ("available_at", 1), ("tenant_id", 1)])
+        await self.jobs.create_index([("purge_at", 1)], expireAfterSeconds=0)
         await self.jobs.create_index(
-            [("state", ASCENDING), ("available_at", ASCENDING), ("tenant_id", ASCENDING)]
-        )
-        await self.jobs.create_index("purge_at", expireAfterSeconds=0)
-        await self.jobs.create_index(
-            [("tenant_id", ASCENDING), ("idempotency_key", ASCENDING)],
+            [("tenant_id", 1), ("idempotency_key", 1)],
             unique=True,
-            partialFilterExpression={"idempotency_key": {"$type": "string"}},
+            sparse=True,
         )
-        await self.audit_logs.create_index([("tenant_id", ASCENDING), ("created_at", DESCENDING)])
+        await self.audit_logs.create_index([("tenant_id", 1), ("created_at", -1)])
+        await self.database["cdkeys"].create_index([("tenant_id", 1), ("code", 1)], unique=True)
+        await self.ensure_admin_config()
 
-    # -- tenants ---------------------------------------------------------
+    async def ensure_admin_config(self) -> dict[str, Any]:
+        doc = await self.metadata.find_one({"_id": "admin_config"})
+        if doc is not None and isinstance(doc.get("value"), dict):
+            val = doc["value"]
+            changed = False
+            if not val.get("admin_id"):
+                val["admin_id"] = CONFIG.platform_admin_id or "admin"
+                changed = True
+            if not val.get("admin_path"):
+                val["admin_path"] = (CONFIG.platform_admin_path or "admin").strip("/") or "admin"
+                changed = True
+            if not val.get("password_hash"):
+                val["password_hash"] = hash_password(CONFIG.platform_admin_password or "admin")
+                changed = True
+            if changed:
+                await self.set_platform_metadata("admin_config", val)
+            return val
+
+        initial_config = {
+            "admin_id": CONFIG.platform_admin_id or "admin",
+            "password_hash": hash_password(CONFIG.platform_admin_password or "admin"),
+            "admin_path": (CONFIG.platform_admin_path or "admin").strip("/") or "admin",
+        }
+        await self.set_platform_metadata("admin_config", initial_config)
+        return initial_config
+
+    async def get_admin_config(self) -> dict[str, Any]:
+        return await self.ensure_admin_config()
+
+    async def get_admin_path(self) -> str:
+        cfg = await self.get_admin_config()
+        return str(cfg.get("admin_path") or "admin").strip("/") or "admin"
+
+    async def verify_admin_credentials(self, admin_id: str, password: str) -> bool:
+        cfg = await self.get_admin_config()
+        expected_id = str(cfg.get("admin_id") or "admin")
+        if admin_id.strip() != expected_id:
+            return False
+        pw_hash = str(cfg.get("password_hash") or "")
+        if pw_hash and verify_password(password, pw_hash):
+            return True
+        return False
+
+    async def update_admin_config(
+        self,
+        *,
+        admin_id: str | None = None,
+        new_password: str | None = None,
+        admin_path: str | None = None,
+    ) -> dict[str, Any]:
+        cfg = dict(await self.get_admin_config())
+        if admin_id is not None and admin_id.strip():
+            cfg["admin_id"] = admin_id.strip()
+        if new_password is not None and new_password != "":
+            cfg["password_hash"] = hash_password(new_password)
+        if admin_path is not None and admin_path.strip().strip("/"):
+            cleaned_path = re.sub(r"[^a-zA-Z0-9_-]", "", admin_path.strip().strip("/"))
+            if cleaned_path and cleaned_path.lower() not in {"api", "static", "health", "kaithhealthcheck", "kaithheathcheck"}:
+                cfg["admin_path"] = cleaned_path
+        await self.set_platform_metadata("admin_config", cfg)
+        return cfg
+
     async def create_tenant(
         self,
         *,
         slug: str,
         display_name: str,
-        bot_token: str,
-        owner_id: int,
-        admin_ids: list[int],
-        db_channel_id: int,
+        bot_token: str = "",
+        owner_id: int = 0,
+        admin_ids: list[int] | None = None,
+        db_channel_id: int = 0,
         web_password: str,
         crypto: TenantCrypto,
         enabled: bool = False,
@@ -152,116 +193,136 @@ class MongoStore:
         bot_username: str = "",
     ) -> dict[str, Any]:
         tenant_id = str(uuid.uuid4())
-        now = timestamp()
-        tenant_settings = tenant_defaults()
-        tenant_settings.update(settings or {})
-        admins = list(dict.fromkeys([int(owner_id), *(int(x) for x in admin_ids)]))
-        document = {
+        merged_settings = tenant_defaults()
+        if settings:
+            merged_settings.update(settings)
+        raw_admins = admin_ids or []
+        admins_list: list[int] = []
+        if int(owner_id or 0) != 0:
+            admins_list.append(int(owner_id))
+        for x in raw_admins:
+            try:
+                val = int(x)
+                if val != 0 and val not in admins_list:
+                    admins_list.append(val)
+            except (ValueError, TypeError):
+                continue
+
+        cleaned_token = (bot_token or "").strip()
+        token_cipher = crypto.encrypt_bot_token(cleaned_token) if cleaned_token else ""
+        token_hint = mask_bot_token(cleaned_token) if cleaned_token else ""
+        can_enable = bool(enabled and cleaned_token and int(db_channel_id or 0) != 0 and int(owner_id or 0) != 0)
+
+        now = utcnow()
+        doc: dict[str, Any] = {
             "_id": tenant_id,
-            "slug": slug,
-            "display_name": display_name,
-            "enabled": bool(enabled),
-            "bot_token_ciphertext": crypto.encrypt_bot_token(bot_token),
-            "bot_token_hint": mask_bot_token(bot_token),
-            "bot_username": bot_username,
-            "owner_id": int(owner_id),
-            "admin_ids": admins,
-            "db_channel_id": int(db_channel_id),
+            "slug": slug.strip().lower(),
+            "display_name": (display_name or slug).strip(),
+            "enabled": can_enable,
+            "bot_token_ciphertext": token_cipher,
+            "bot_token_hint": token_hint,
+            "bot_username": (bot_username or "").strip().lstrip("@"),
+            "owner_id": int(owner_id or 0),
+            "admin_ids": admins_list,
+            "db_channel_id": int(db_channel_id or 0),
             "web_password_hash": hash_password(web_password),
-            "settings": tenant_settings,
+            "settings": merged_settings,
             "config_version": 1,
             "created_at": now,
             "updated_at": now,
         }
-        await self.tenants.insert_one(document)
-        return document
+        await self.tenants.insert_one(doc)
+        return doc
 
     async def get_tenant(self, tenant_id: str) -> dict[str, Any] | None:
         return await self.tenants.find_one({"_id": str(tenant_id)})
 
     async def get_tenant_by_slug(self, slug: str) -> dict[str, Any] | None:
-        return await self.tenants.find_one({"slug": slug})
+        if not slug:
+            return None
+        return await self.tenants.find_one({"slug": slug.strip().lower()})
 
     async def list_tenants(self, *, enabled: bool | None = None) -> list[dict[str, Any]]:
         query: dict[str, Any] = {}
         if enabled is not None:
-            query["enabled"] = enabled
-        cursor = self.tenants.find(query).sort("created_at", ASCENDING)
-        return [document async for document in cursor]
+            query["enabled"] = bool(enabled)
+        cursor = self.tenants.find(query).sort("created_at", -1)
+        return await cursor.to_list(length=5000)
 
-    async def update_tenant_core(
-        self, tenant_id: str, updates: dict[str, Any]
-    ) -> dict[str, Any] | None:
-        if not updates:
-            return await self.get_tenant(tenant_id)
-        safe = {
-            key: value
-            for key, value in updates.items()
-            if key
-            in {
-                "display_name",
-                "enabled",
-                "owner_id",
-                "admin_ids",
-                "db_channel_id",
-                "bot_token_ciphertext",
-                "bot_token_hint",
-                "bot_username",
-                "web_password_hash",
-            }
+    async def update_tenant_core(self, tenant_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        allowed_keys = {
+            "slug",
+            "display_name",
+            "enabled",
+            "owner_id",
+            "admin_ids",
+            "db_channel_id",
+            "bot_token_ciphertext",
+            "bot_token_hint",
+            "bot_username",
+            "web_password_hash",
         }
-        if not safe:
+        filtered = {k: v for k, v in updates.items() if k in allowed_keys}
+        if not filtered:
             return await self.get_tenant(tenant_id)
-        safe["updated_at"] = timestamp()
+        filtered["updated_at"] = utcnow()
         return await self.tenants.find_one_and_update(
             {"_id": str(tenant_id)},
-            {"$set": safe, "$inc": {"config_version": 1}},
+            {"$set": filtered, "$inc": {"config_version": 1}},
             return_document=ReturnDocument.AFTER,
         )
 
-    async def update_tenant_settings(
-        self, tenant_id: str, settings: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def update_tenant_settings(self, tenant_id: str, settings: dict[str, Any]) -> dict[str, Any] | None:
         if not settings:
             return await self.get_tenant(tenant_id)
-        updates = {f"settings.{key}": value for key, value in settings.items()}
-        updates["updated_at"] = timestamp()
+        set_Ops = {f"settings.{k}": v for k, v in settings.items()}
+        set_Ops["updated_at"] = utcnow()
         return await self.tenants.find_one_and_update(
             {"_id": str(tenant_id)},
-            {"$set": updates, "$inc": {"config_version": 1}},
+            {"$set": set_Ops, "$inc": {"config_version": 1}},
             return_document=ReturnDocument.AFTER,
         )
 
     async def reset_tenant_setting(self, tenant_id: str, key: str) -> bool:
-        result = await self.tenants.update_one(
+        defaults = tenant_defaults()
+        if key not in defaults:
+            return False
+        res = await self.tenants.update_one(
             {"_id": str(tenant_id)},
-            {
-                "$unset": {f"settings.{key}": ""},
-                "$set": {"updated_at": timestamp()},
-                "$inc": {"config_version": 1},
-            },
+            {"$set": {f"settings.{key}": defaults[key], "updated_at": utcnow()}, "$inc": {"config_version": 1}},
         )
-        return result.matched_count == 1
+        return res.matched_count > 0
 
-    # -- users -----------------------------------------------------------
+    async def delete_tenant(self, tenant_id: str) -> bool:
+        tid = str(tenant_id)
+        res = await self.tenants.delete_one({"_id": tid})
+        await self.users.delete_many({"tenant_id": tid})
+        await self.shares.delete_many({"tenant_id": tid})
+        await self.banned_users.delete_many({"tenant_id": tid})
+        await self.stats.delete_many({"tenant_id": tid})
+        await self.sessions.delete_many({"tenant_id": tid})
+        await self.leases.delete_many({"tenant_id": tid})
+        await self.jobs.delete_many({"tenant_id": tid})
+        await self.database["cdkeys"].delete_many({"tenant_id": tid})
+        return res.deleted_count > 0
+
     async def present_user(self, tenant_id: str, user_id: int) -> bool:
-        return bool(
-            await self.users.find_one(
-                {"tenant_id": str(tenant_id), "user_id": int(user_id)}, {"_id": 1}
-            )
-        )
+        doc = await self.users.find_one({"tenant_id": str(tenant_id), "user_id": int(user_id)}, {"_id": 1})
+        return doc is not None
 
     async def add_user(self, tenant_id: str, user_id: int) -> None:
+        now = timestamp()
         await self.users.update_one(
             {"tenant_id": str(tenant_id), "user_id": int(user_id)},
             {
                 "$setOnInsert": {
                     "tenant_id": str(tenant_id),
                     "user_id": int(user_id),
+                    "joined_at": now,
                     "verify_status": {
                         "is_verified": False,
                         "verified_time": 0,
-                        "verify_token": EMPTY_STRING,
+                        "verify_token": "",
                         "link": "",
                     },
                     "force_sub_status": {
@@ -269,78 +330,69 @@ class MongoStore:
                         "verified_at": 0,
                         "channels": [],
                     },
-                    "joined_at": timestamp(),
                 }
             },
             upsert=True,
         )
 
     async def get_verify_status(self, tenant_id: str, user_id: int) -> dict[str, Any]:
-        document = await self.users.find_one(
-            {"tenant_id": str(tenant_id), "user_id": int(user_id)},
-            {"verify_status": 1},
-        )
-        status = (document or {}).get("verify_status") or {}
-        return {
-            "is_verified": bool(status.get("is_verified", False)),
-            "verified_time": status.get("verified_time", 0),
-            "verify_token": status.get("verify_token", ""),
-            "link": status.get("link", ""),
+        doc = await self.users.find_one({"tenant_id": str(tenant_id), "user_id": int(user_id)})
+        default = {
+            "is_verified": False,
+            "verified_time": 0,
+            "verify_token": "",
+            "link": "",
         }
+        if not doc or not isinstance(doc.get("verify_status"), dict):
+            return default
+        merged = dict(default)
+        merged.update(doc["verify_status"])
+        return merged
 
-    async def update_verify_status(
-        self, tenant_id: str, user_id: int, status: dict[str, Any]
-    ) -> None:
+    async def update_verify_status(self, tenant_id: str, user_id: int, status: dict[str, Any]) -> None:
         await self.add_user(tenant_id, user_id)
         await self.users.update_one(
             {"tenant_id": str(tenant_id), "user_id": int(user_id)},
-            {"$set": {"verify_status": dict(status)}},
+            {"$set": {"verify_status": status}},
         )
 
-    async def update_force_sub_status(
-        self, tenant_id: str, user_id: int, status: dict[str, Any]
-    ) -> None:
+    async def update_force_sub_status(self, tenant_id: str, user_id: int, status: dict[str, Any]) -> None:
         await self.add_user(tenant_id, user_id)
         await self.users.update_one(
             {"tenant_id": str(tenant_id), "user_id": int(user_id)},
-            {"$set": {"force_sub_status": dict(status)}},
+            {"$set": {"force_sub_status": status}},
         )
 
-    async def list_users(
-        self, tenant_id: str, page: int = 1, per_page: int = 20
-    ) -> tuple[list[int], int]:
-        query = {"tenant_id": str(tenant_id)}
-        total = await self.users.count_documents(query)
-        cursor = (
-            self.users.find(query, {"user_id": 1, "_id": 0})
-            .sort("joined_at", DESCENDING)
-            .skip(max(0, page - 1) * per_page)
-            .limit(per_page)
-        )
-        return [document["user_id"] async for document in cursor], total
+    async def list_users(self, tenant_id: str, page: int = 1, per_page: int = 20) -> tuple[list[int], int]:
+        tid = str(tenant_id)
+        total = await self.users.count_documents({"tenant_id": tid})
+        skip = max(0, (page - 1) * per_page)
+        cursor = self.users.find({"tenant_id": tid}).sort("joined_at", -1).skip(skip).limit(per_page)
+        docs = await cursor.to_list(length=per_page)
+        return [int(d["user_id"]) for d in docs if "user_id" in d], total
 
     async def iter_user_ids(self, tenant_id: str) -> AsyncIterator[int]:
         cursor = self.users.find({"tenant_id": str(tenant_id)}, {"user_id": 1})
-        async for document in cursor:
-            yield int(document["user_id"])
+        async for doc in cursor:
+            if "user_id" in doc:
+                yield int(doc["user_id"])
 
     async def full_userbase(self, tenant_id: str) -> list[int]:
-        return [user_id async for user_id in self.iter_user_ids(tenant_id)]
+        return [uid async for uid in self.iter_user_ids(tenant_id)]
 
     async def delete_user(self, tenant_id: str, user_id: int) -> bool:
-        result = await self.users.delete_one({"tenant_id": str(tenant_id), "user_id": int(user_id)})
-        return result.deleted_count == 1
+        res = await self.users.delete_one({"tenant_id": str(tenant_id), "user_id": int(user_id)})
+        return res.deleted_count > 0
 
     async def get_user_count(self, tenant_id: str) -> int:
         return await self.users.count_documents({"tenant_id": str(tenant_id)})
 
     async def get_recent_users(self, tenant_id: str, days: int = 7) -> int:
-        cutoff = timestamp() - days * 86400
+        cutoff = timestamp() - (days * 86400)
         return await self.users.count_documents(
             {"tenant_id": str(tenant_id), "joined_at": {"$gte": cutoff}}
         )
 
-    # -- shares ----------------------------------------------------------
     async def create_share(
         self,
         tenant_id: str,
@@ -353,68 +405,67 @@ class MongoStore:
         keywords: list[str] | None = None,
         code_length: int = 8,
     ) -> dict[str, Any]:
-        chars = string.ascii_letters + string.digits
-        candidate = share_code
-        for _ in range(10):
-            now = timestamp()
-            document = {
-                "tenant_id": str(tenant_id),
-                "code": candidate,
-                "owner_id": int(owner_id),
-                "message_ids": [int(value) for value in message_ids],
-                "title": title,
-                "group_text": group_text,
-                "keywords": list(keywords or []),
-                "protect_content": bool(protect_content),
-                "access_count": 0,
-                "created_at": now,
-                "updated_at": now,
-            }
-            try:
-                result = await self.shares.insert_one(document)
-                document["_id"] = result.inserted_id
-                return document
-            except DuplicateKeyError:
-                candidate = "".join(secrets.choice(chars) for _ in range(code_length))
-        raise RuntimeError("Unable to allocate a unique share code")
+        now = timestamp()
+        doc: dict[str, Any] = {
+            "tenant_id": str(tenant_id),
+            "code": str(share_code),
+            "owner_id": int(owner_id),
+            "message_ids": [int(m) for m in message_ids],
+            "title": str(title or ""),
+            "group_text": str(group_text or ""),
+            "keywords": [str(k).strip() for k in (keywords or []) if str(k).strip()],
+            "protect_content": bool(protect_content),
+            "access_count": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+        await self.shares.update_one(
+            {"tenant_id": str(tenant_id), "code": str(share_code)},
+            {"$set": doc},
+            upsert=True,
+        )
+        return doc
 
     async def get_share(self, tenant_id: str, share_code: str) -> dict[str, Any] | None:
-        return await self.shares.find_one({"tenant_id": str(tenant_id), "code": share_code})
+        return await self.shares.find_one({"tenant_id": str(tenant_id), "code": str(share_code)})
 
-    async def find_share_by_message_id(
-        self, tenant_id: str, message_id: int
-    ) -> dict[str, Any] | None:
-        return await self.shares.find_one(
-            {"tenant_id": str(tenant_id), "message_ids": int(message_id)}
-        )
+    async def find_share_by_message_id(self, tenant_id: str, message_id: int) -> dict[str, Any] | None:
+        return await self.shares.find_one({"tenant_id": str(tenant_id), "message_ids": int(message_id)})
 
     async def find_share_by_group_text(
         self, tenant_id: str, group_text: str, owner_id: int | None = None
     ) -> dict[str, Any] | None:
+        if not group_text:
+            return None
         query: dict[str, Any] = {"tenant_id": str(tenant_id), "group_text": group_text}
         if owner_id is not None:
             query["owner_id"] = int(owner_id)
         return await self.shares.find_one(query)
 
     async def find_share_by_keyword(self, tenant_id: str, keyword: str) -> dict[str, Any] | None:
-        return await self.shares.find_one(
-            {"tenant_id": str(tenant_id), "keywords": keyword},
-            sort=[("created_at", DESCENDING)],
-        )
+        if not keyword:
+            return None
+        return await self.shares.find_one({"tenant_id": str(tenant_id), "keywords": keyword})
 
-    async def find_shares_by_keyword(
-        self, tenant_id: str, keyword: str, limit: int = 6
-    ) -> list[dict[str, Any]]:
-        cursor = (
-            self.shares.find({"tenant_id": str(tenant_id), "keywords": keyword})
-            .sort("created_at", DESCENDING)
-            .limit(limit)
-        )
-        return [document async for document in cursor]
+    async def find_shares_by_keyword(self, tenant_id: str, keyword: str, limit: int = 6) -> list[dict[str, Any]]:
+        if not keyword:
+            return []
+        escaped = re.escape(keyword.strip())
+        cursor = self.shares.find(
+            {
+                "tenant_id": str(tenant_id),
+                "$or": [
+                    {"keywords": {"$regex": escaped, "$options": "i"}},
+                    {"title": {"$regex": escaped, "$options": "i"}},
+                    {"group_text": {"$regex": escaped, "$options": "i"}},
+                ],
+            }
+        ).sort("created_at", -1).limit(limit)
+        return await cursor.to_list(length=limit)
 
     async def increment_share_access(self, tenant_id: str, share_code: str) -> None:
         await self.shares.update_one(
-            {"tenant_id": str(tenant_id), "code": share_code},
+            {"tenant_id": str(tenant_id), "code": str(share_code)},
             {"$inc": {"access_count": 1}},
         )
 
@@ -423,47 +474,32 @@ class MongoStore:
     ) -> tuple[list[dict[str, Any]], int]:
         query = {"tenant_id": str(tenant_id), "owner_id": int(owner_id)}
         total = await self.shares.count_documents(query)
-        cursor = (
-            self.shares.find(query)
-            .sort("created_at", DESCENDING)
-            .skip(max(0, page - 1) * per_page)
-            .limit(per_page)
-        )
-        return [document async for document in cursor], total
+        skip = max(0, (page - 1) * per_page)
+        cursor = self.shares.find(query).sort("created_at", -1).skip(skip).limit(per_page)
+        return await cursor.to_list(length=per_page), total
 
     async def list_shares(
         self, tenant_id: str, page: int = 1, per_page: int = 20
     ) -> tuple[list[dict[str, Any]], int]:
         query = {"tenant_id": str(tenant_id)}
         total = await self.shares.count_documents(query)
-        cursor = (
-            self.shares.find(query)
-            .sort("created_at", DESCENDING)
-            .skip(max(0, page - 1) * per_page)
-            .limit(per_page)
-        )
-        return [document async for document in cursor], total
+        skip = max(0, (page - 1) * per_page)
+        cursor = self.shares.find(query).sort("created_at", -1).skip(skip).limit(per_page)
+        return await cursor.to_list(length=per_page), total
 
     async def iter_shares(self, tenant_id: str) -> AsyncIterator[dict[str, Any]]:
-        cursor = self.shares.find({"tenant_id": str(tenant_id)}).sort(
-            "created_at", ASCENDING
-        )
-        async for document in cursor:
-            yield document
+        cursor = self.shares.find({"tenant_id": str(tenant_id)})
+        async for doc in cursor:
+            yield doc
 
     async def update_share(self, tenant_id: str, share_code: str, updates: dict[str, Any]) -> bool:
-        safe = {
-            key: value
-            for key, value in updates.items()
-            if key in {"title", "protect_content", "group_text", "keywords"}
-        }
-        if not safe:
-            return bool(await self.get_share(tenant_id, share_code))
-        safe["updated_at"] = timestamp()
-        result = await self.shares.update_one(
-            {"tenant_id": str(tenant_id), "code": share_code}, {"$set": safe}
+        updates = dict(updates)
+        updates["updated_at"] = timestamp()
+        res = await self.shares.update_one(
+            {"tenant_id": str(tenant_id), "code": str(share_code)},
+            {"$set": updates},
         )
-        return result.matched_count == 1
+        return res.matched_count > 0
 
     async def merge_share_messages(
         self,
@@ -472,104 +508,107 @@ class MongoStore:
         message_ids: list[int],
         keywords: list[str] | None = None,
     ) -> bool:
-        update: dict[str, Any] = {
-            "$addToSet": {"message_ids": {"$each": [int(value) for value in message_ids]}},
+        update_doc: dict[str, Any] = {
+            "$addToSet": {"message_ids": {"$each": [int(m) for m in message_ids]}},
             "$set": {"updated_at": timestamp()},
         }
         if keywords:
-            update["$set"]["keywords"] = list(keywords)
-        result = await self.shares.update_one(
-            {"tenant_id": str(tenant_id), "code": share_code}, update
+            update_doc["$addToSet"]["keywords"] = {"$each": [str(k).strip() for k in keywords if str(k).strip()]}
+        res = await self.shares.update_one(
+            {"tenant_id": str(tenant_id), "code": str(share_code)},
+            update_doc,
         )
-        return result.matched_count == 1
+        return res.matched_count > 0
 
     async def delete_share(self, tenant_id: str, share_code: str) -> bool:
-        result = await self.shares.delete_one({"tenant_id": str(tenant_id), "code": share_code})
-        return result.deleted_count == 1
+        res = await self.shares.delete_one({"tenant_id": str(tenant_id), "code": str(share_code)})
+        return res.deleted_count > 0
 
     async def get_total_shares(self, tenant_id: str) -> int:
         return await self.shares.count_documents({"tenant_id": str(tenant_id)})
 
-    async def search_shares(
-        self, tenant_id: str, query: str, limit: int = 10
-    ) -> list[dict[str, Any]]:
-        shares, _ = await self.search_shares_page(tenant_id, query, 1, limit)
-        return shares
+    async def search_shares(self, tenant_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        escaped = re.escape(query.strip())
+        q = {
+            "tenant_id": str(tenant_id),
+            "$or": [
+                {"code": {"$regex": escaped, "$options": "i"}},
+                {"title": {"$regex": escaped, "$options": "i"}},
+                {"group_text": {"$regex": escaped, "$options": "i"}},
+                {"keywords": {"$regex": escaped, "$options": "i"}},
+            ],
+        }
+        cursor = self.shares.find(q).sort("created_at", -1).limit(limit)
+        return await cursor.to_list(length=limit)
 
     async def search_shares_page(
         self, tenant_id: str, query: str, page: int, per_page: int
     ) -> tuple[list[dict[str, Any]], int]:
-        escaped = re.escape(query)
-        search_filter = {
+        escaped = re.escape(query.strip())
+        q = {
             "tenant_id": str(tenant_id),
             "$or": [
+                {"code": {"$regex": escaped, "$options": "i"}},
                 {"title": {"$regex": escaped, "$options": "i"}},
+                {"group_text": {"$regex": escaped, "$options": "i"}},
                 {"keywords": {"$regex": escaped, "$options": "i"}},
-                {"code": query},
             ],
         }
-        total = await self.shares.count_documents(search_filter)
-        cursor = (
-            self.shares.find(search_filter)
-            .sort("created_at", DESCENDING)
-            .skip(max(0, page - 1) * per_page)
-            .limit(per_page)
-        )
-        return [document async for document in cursor], total
+        total = await self.shares.count_documents(q)
+        skip = max(0, (page - 1) * per_page)
+        cursor = self.shares.find(q).sort("created_at", -1).skip(skip).limit(per_page)
+        return await cursor.to_list(length=per_page), total
 
     async def get_user_share_count(self, tenant_id: str, owner_id: int) -> int:
-        return await self.shares.count_documents(
-            {"tenant_id": str(tenant_id), "owner_id": int(owner_id)}
-        )
+        return await self.shares.count_documents({"tenant_id": str(tenant_id), "owner_id": int(owner_id)})
 
-    # -- bans and stats --------------------------------------------------
     async def ban_user(self, tenant_id: str, user_id: int, reason: str = "") -> None:
         await self.banned_users.update_one(
             {"tenant_id": str(tenant_id), "user_id": int(user_id)},
             {
-                "$set": {"reason": reason, "banned_at": timestamp()},
-                "$setOnInsert": {"tenant_id": str(tenant_id), "user_id": int(user_id)},
+                "$set": {
+                    "tenant_id": str(tenant_id),
+                    "user_id": int(user_id),
+                    "reason": str(reason or ""),
+                    "banned_at": timestamp(),
+                }
             },
             upsert=True,
         )
 
     async def unban_user(self, tenant_id: str, user_id: int) -> bool:
-        result = await self.banned_users.delete_one(
-            {"tenant_id": str(tenant_id), "user_id": int(user_id)}
-        )
-        return result.deleted_count == 1
+        res = await self.banned_users.delete_one({"tenant_id": str(tenant_id), "user_id": int(user_id)})
+        return res.deleted_count > 0
 
     async def is_banned(self, tenant_id: str, user_id: int) -> dict[str, Any] | None:
-        return await self.banned_users.find_one(
-            {"tenant_id": str(tenant_id), "user_id": int(user_id)}
-        )
+        return await self.banned_users.find_one({"tenant_id": str(tenant_id), "user_id": int(user_id)})
 
     async def get_banned_users(self, tenant_id: str) -> list[dict[str, Any]]:
-        cursor = self.banned_users.find({"tenant_id": str(tenant_id)}).sort("banned_at", DESCENDING)
-        return [document async for document in cursor]
+        cursor = self.banned_users.find({"tenant_id": str(tenant_id)}).sort("banned_at", -1)
+        return await cursor.to_list(length=2000)
 
     async def get_banned_count(self, tenant_id: str) -> int:
         return await self.banned_users.count_documents({"tenant_id": str(tenant_id)})
 
     async def increment_stat(self, tenant_id: str, key: str, value: int = 1) -> None:
         await self.stats.update_one(
-            {"tenant_id": str(tenant_id), "key": key},
-            {
-                "$inc": {"count": int(value)},
-                "$setOnInsert": {"tenant_id": str(tenant_id), "key": key},
-            },
+            {"tenant_id": str(tenant_id), "key": str(key)},
+            {"$inc": {"count": int(value)}},
             upsert=True,
         )
 
     async def get_stat(self, tenant_id: str, key: str) -> int:
-        document = await self.stats.find_one({"tenant_id": str(tenant_id), "key": key})
-        return int((document or {}).get("count", 0))
+        doc = await self.stats.find_one({"tenant_id": str(tenant_id), "key": str(key)})
+        return int(doc["count"]) if doc and "count" in doc else 0
 
     async def get_all_stats(self, tenant_id: str) -> dict[str, int]:
         cursor = self.stats.find({"tenant_id": str(tenant_id)})
-        return {document["key"]: int(document.get("count", 0)) async for document in cursor}
+        result: dict[str, int] = {}
+        async for doc in cursor:
+            if "key" in doc:
+                result[str(doc["key"])] = int(doc.get("count", 0))
+        return result
 
-    # -- web sessions and audit -----------------------------------------
     async def create_session(
         self,
         *,
@@ -581,41 +620,48 @@ class MongoStore:
         impersonated: bool = False,
     ) -> str:
         token = generate_session_token()
+        digest = token_digest(token)
         now = utcnow()
-        await self.sessions.insert_one(
-            {
-                "_id": token_digest(token),
-                "role": role,
-                "tenant_id": tenant_id,
-                "actor_role": actor_role or role,
-                "actor_id": actor_id or tenant_id or "platform",
-                "impersonated": bool(impersonated),
-                "created_at": now,
-                "expires_at": now + timedelta(seconds=expires_in),
-            }
-        )
+        doc = {
+            "_id": digest,
+            "role": str(role),
+            "tenant_id": str(tenant_id) if tenant_id else None,
+            "actor_role": str(actor_role or role),
+            "actor_id": str(actor_id or tenant_id or role),
+            "impersonated": bool(impersonated),
+            "created_at": now,
+            "expires_at": now + timedelta(seconds=max(60, int(expires_in))),
+        }
+        await self.sessions.insert_one(doc)
         return token
 
     async def get_session(self, token: str) -> dict[str, Any] | None:
         if not token:
             return None
-        return await self.sessions.find_one(
-            {"_id": token_digest(token), "expires_at": {"$gt": utcnow()}}
-        )
+        digest = token_digest(token)
+        doc = await self.sessions.find_one({"_id": digest})
+        if not doc:
+            return None
+        expires_at = doc.get("expires_at")
+        if isinstance(expires_at, datetime):
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= utcnow():
+                await self.sessions.delete_one({"_id": digest})
+                return None
+        return doc
 
     async def delete_session(self, token: str) -> None:
-        if token:
-            await self.sessions.delete_one({"_id": token_digest(token)})
+        if not token:
+            return
+        await self.sessions.delete_one({"_id": token_digest(token)})
 
     async def delete_tenant_sessions(self, tenant_id: str) -> int:
-        result = await self.sessions.delete_many(
-            {"tenant_id": str(tenant_id), "impersonated": {"$ne": True}}
-        )
-        return result.deleted_count
+        res = await self.sessions.delete_many({"tenant_id": str(tenant_id)})
+        return res.deleted_count
 
     async def record_audit(
         self,
-        *,
         action: str,
         actor_role: str,
         actor_id: str,
@@ -626,58 +672,45 @@ class MongoStore:
     ) -> None:
         await self.audit_logs.insert_one(
             {
-                "action": action,
-                "actor_role": actor_role,
-                "actor_id": actor_id,
-                "tenant_id": tenant_id,
-                "target": target,
+                "action": str(action),
+                "actor_role": str(actor_role),
+                "actor_id": str(actor_id),
+                "tenant_id": str(tenant_id) if tenant_id else None,
+                "target": str(target),
                 "metadata": metadata or {},
-                "remote_ip": remote_ip,
-                "created_at": timestamp(),
+                "remote_ip": str(remote_ip),
+                "created_at": utcnow(),
             }
         )
 
-    # -- worker leases ---------------------------------------------------
-    async def claim_lease(
-        self, tenant_id: str, worker_id: str, lease_seconds: int
-    ) -> dict[str, Any] | None:
+    async def claim_lease(self, tenant_id: str, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
         now = utcnow()
-        expires_at = now + timedelta(seconds=lease_seconds)
-        document = await self.leases.find_one_and_update(
-            {
-                "tenant_id": str(tenant_id),
-                "$or": [
-                    {"expires_at": {"$lte": now}},
-                    {"worker_id": worker_id},
-                ],
-            },
-            {
-                "$set": {
-                    "worker_id": worker_id,
-                    "expires_at": expires_at,
-                    "heartbeat_at": now,
-                    "status": "starting",
-                    "last_error": "",
-                },
-                "$inc": {"generation": 1},
-            },
-            return_document=ReturnDocument.AFTER,
-        )
-        if document:
-            return document
+        expires = now + timedelta(seconds=max(10, int(lease_seconds)))
+        tid = str(tenant_id)
         try:
-            document = {
-                "tenant_id": str(tenant_id),
-                "worker_id": worker_id,
-                "generation": 1,
-                "expires_at": expires_at,
-                "heartbeat_at": now,
-                "status": "starting",
-                "last_error": "",
-            }
-            result = await self.leases.insert_one(document)
-            document["_id"] = result.inserted_id
-            return document
+            doc = await self.leases.find_one_and_update(
+                {
+                    "tenant_id": tid,
+                    "$or": [
+                        {"expires_at": {"$lte": now}},
+                        {"worker_id": str(worker_id)},
+                    ],
+                },
+                {
+                    "$set": {
+                        "worker_id": str(worker_id),
+                        "expires_at": expires,
+                        "heartbeat_at": now,
+                        "status": "starting",
+                        "last_error": "",
+                    },
+                    "$inc": {"generation": 1},
+                    "$setOnInsert": {"tenant_id": tid},
+                },
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+            return doc
         except DuplicateKeyError:
             return None
 
@@ -693,30 +726,30 @@ class MongoStore:
         bot_username: str = "",
     ) -> bool:
         now = utcnow()
-        result = await self.leases.update_one(
+        expires = now + timedelta(seconds=max(10, int(lease_seconds)))
+        update_fields: dict[str, Any] = {
+            "expires_at": expires,
+            "heartbeat_at": now,
+            "status": str(status),
+            "last_error": str(last_error or ""),
+        }
+        if bot_username:
+            update_fields["bot_username"] = str(bot_username)
+        res = await self.leases.update_one(
             {
                 "tenant_id": str(tenant_id),
-                "worker_id": worker_id,
+                "worker_id": str(worker_id),
                 "generation": int(generation),
-                "expires_at": {"$gt": now},
             },
-            {
-                "$set": {
-                    "heartbeat_at": now,
-                    "expires_at": now + timedelta(seconds=lease_seconds),
-                    "status": status,
-                    "last_error": last_error[:500],
-                    "bot_username": bot_username,
-                }
-            },
+            {"$set": update_fields},
         )
-        return result.matched_count == 1
+        return res.matched_count > 0
 
     async def release_lease(self, tenant_id: str, worker_id: str, generation: int) -> None:
         await self.leases.delete_one(
             {
                 "tenant_id": str(tenant_id),
-                "worker_id": worker_id,
+                "worker_id": str(worker_id),
                 "generation": int(generation),
             }
         )
@@ -724,7 +757,6 @@ class MongoStore:
     async def get_tenant_runtime(self, tenant_id: str) -> dict[str, Any] | None:
         return await self.leases.find_one({"tenant_id": str(tenant_id)})
 
-    # -- worker jobs -----------------------------------------------------
     async def create_job(
         self,
         *,
@@ -735,35 +767,35 @@ class MongoStore:
         idempotency_key: str | None = None,
         max_attempts: int = 3,
     ) -> dict[str, Any]:
+        tid = str(tenant_id)
+        if idempotency_key:
+            existing = await self.jobs.find_one({"tenant_id": tid, "idempotency_key": str(idempotency_key)})
+            if existing:
+                return existing
         now = utcnow()
-        document = {
-            "_id": str(uuid.uuid4()),
-            "tenant_id": str(tenant_id),
-            "type": job_type,
+        job_id = str(uuid.uuid4())
+        doc: dict[str, Any] = {
+            "_id": job_id,
+            "tenant_id": tid,
+            "type": str(job_type),
             "state": "queued",
-            "payload": payload,
-            "actor": actor,
-            "idempotency_key": idempotency_key,
-            "progress": {"current": 0, "total": 0, "successful": 0, "failed": 0},
+            "payload": payload or {},
+            "actor": actor or {},
+            "progress": {"processed": 0, "total": 0, "succeeded": 0, "failed": 0},
             "attempts": 0,
             "max_attempts": int(max_attempts),
             "available_at": now,
             "created_at": now,
             "updated_at": now,
+            "started_at": None,
+            "completed_at": None,
             "last_error": "",
+            "purge_at": now + timedelta(days=7),
         }
-        if idempotency_key is None:
-            document.pop("idempotency_key")
-        try:
-            await self.jobs.insert_one(document)
-            return document
-        except DuplicateKeyError:
-            existing = await self.jobs.find_one(
-                {"tenant_id": str(tenant_id), "idempotency_key": idempotency_key}
-            )
-            if existing:
-                return existing
-            raise
+        if idempotency_key:
+            doc["idempotency_key"] = str(idempotency_key)
+        await self.jobs.insert_one(doc)
+        return doc
 
     async def claim_job(
         self,
@@ -776,70 +808,56 @@ class MongoStore:
             return None
         now = utcnow()
         query: dict[str, Any] = {
-            "tenant_id": {"$in": [str(value) for value in tenant_ids]},
             "state": "queued",
             "available_at": {"$lte": now},
-            "$expr": {"$lt": ["$attempts", "$max_attempts"]},
+            "tenant_id": {"$in": [str(t) for t in tenant_ids]},
         }
         if job_types:
-            query["type"] = {"$in": job_types}
+            query["type"] = {"$in": list(job_types)}
         return await self.jobs.find_one_and_update(
             query,
             {
                 "$set": {
-                    "state": "processing",
-                    "worker_id": worker_id,
-                    "lease_expires_at": now + timedelta(seconds=lease_seconds),
+                    "state": "running",
+                    "worker_id": str(worker_id),
+                    "started_at": now,
                     "updated_at": now,
+                    "lease_expires_at": now + timedelta(seconds=max(10, int(lease_seconds))),
                 },
                 "$inc": {"attempts": 1},
             },
-            sort=[("created_at", ASCENDING)],
+            sort=[("available_at", 1)],
             return_document=ReturnDocument.AFTER,
         )
 
     async def update_job_progress(
-        self,
-        job_id: str,
-        worker_id: str,
-        progress: dict[str, int],
-        lease_seconds: int,
+        self, job_id: str, worker_id: str, progress: dict[str, int], lease_seconds: int
     ) -> bool:
         now = utcnow()
-        result = await self.jobs.update_one(
-            {
-                "_id": job_id,
-                "worker_id": worker_id,
-                "state": "processing",
-                "lease_expires_at": {"$gt": now},
-            },
+        res = await self.jobs.update_one(
+            {"_id": str(job_id), "worker_id": str(worker_id), "state": "running"},
             {
                 "$set": {
                     "progress": progress,
                     "updated_at": now,
-                    "lease_expires_at": now + timedelta(seconds=lease_seconds),
+                    "lease_expires_at": now + timedelta(seconds=max(10, int(lease_seconds))),
                 }
             },
         )
-        return result.matched_count == 1
+        return res.matched_count > 0
 
     async def renew_job_lease(self, job_id: str, worker_id: str, lease_seconds: int) -> bool:
         now = utcnow()
-        result = await self.jobs.update_one(
-            {
-                "_id": job_id,
-                "worker_id": worker_id,
-                "state": "processing",
-                "lease_expires_at": {"$gt": now},
-            },
+        res = await self.jobs.update_one(
+            {"_id": str(job_id), "worker_id": str(worker_id), "state": "running"},
             {
                 "$set": {
-                    "lease_expires_at": now + timedelta(seconds=lease_seconds),
                     "updated_at": now,
+                    "lease_expires_at": now + timedelta(seconds=max(10, int(lease_seconds))),
                 }
             },
         )
-        return result.matched_count == 1
+        return res.matched_count > 0
 
     async def finish_job(
         self,
@@ -851,123 +869,61 @@ class MongoStore:
         error: str = "",
     ) -> None:
         now = utcnow()
-        document = await self.jobs.find_one(
-            {
-                "_id": job_id,
-                "worker_id": worker_id,
-                "state": "processing",
-                "lease_expires_at": {"$gt": now},
-            }
-        )
-        if not document:
-            return
-        if success:
-            update = {
-                "state": "completed",
-                "result": result or {},
-                "last_error": "",
-                "updated_at": now,
-                "purge_at": now + timedelta(days=7),
-            }
-        elif int(document.get("attempts", 0)) < int(document.get("max_attempts", 3)):
-            update = {
-                "state": "queued",
-                "available_at": now + timedelta(seconds=min(60, 2 ** document["attempts"])),
-                "last_error": error[:500],
-                "updated_at": now,
-            }
-        else:
-            update = {
-                "state": "failed",
-                "last_error": error[:500],
-                "updated_at": now,
-                "purge_at": now + timedelta(days=7),
-            }
+        state = "completed" if success else "failed"
         await self.jobs.update_one(
+            {"_id": str(job_id)},
             {
-                "_id": job_id,
-                "worker_id": worker_id,
-                "state": "processing",
-                "lease_expires_at": {"$gt": now},
+                "$set": {
+                    "state": state,
+                    "result": result or {},
+                    "last_error": str(error or ""),
+                    "completed_at": now,
+                    "updated_at": now,
+                }
             },
-            {"$set": update, "$unset": {"worker_id": "", "lease_expires_at": ""}},
         )
 
     async def requeue_expired_jobs(self) -> int:
         now = utcnow()
-        exhausted = await self.jobs.update_many(
-            {
-                "state": "processing",
-                "lease_expires_at": {"$lte": now},
-                "$expr": {"$gte": ["$attempts", "$max_attempts"]},
-            },
-            {
-                "$set": {
-                    "state": "failed",
-                    "last_error": "Worker lease expired after final attempt",
-                    "updated_at": now,
-                    "purge_at": now + timedelta(days=7),
-                },
-                "$unset": {"worker_id": "", "lease_expires_at": ""},
-            },
-        )
-        retryable = await self.jobs.update_many(
-            {
-                "state": "processing",
-                "lease_expires_at": {"$lte": now},
-                "$expr": {"$lt": ["$attempts", "$max_attempts"]},
-            },
-            {
-                "$set": {"state": "queued", "available_at": now, "updated_at": now},
-                "$unset": {"worker_id": "", "lease_expires_at": ""},
-            },
-        )
-        return exhausted.modified_count + retryable.modified_count
+        cursor = self.jobs.find({"state": "running", "lease_expires_at": {"$lte": now}})
+        count = 0
+        async for job in cursor:
+            attempts = int(job.get("attempts", 1))
+            max_attempts = int(job.get("max_attempts", 3))
+            if attempts >= max_attempts:
+                await self.jobs.update_one(
+                    {"_id": job["_id"], "state": "running"},
+                    {"$set": {"state": "failed", "last_error": "Job lease expired", "updated_at": now}},
+                )
+            else:
+                await self.jobs.update_one(
+                    {"_id": job["_id"], "state": "running"},
+                    {"$set": {"state": "queued", "available_at": now, "updated_at": now}},
+                )
+            count += 1
+        return count
 
     async def cancel_tenant_jobs(self, tenant_id: str, reason: str) -> int:
         now = utcnow()
-        result = await self.jobs.update_many(
-            {
-                "tenant_id": str(tenant_id),
-                "state": {"$in": ["queued", "processing"]},
-            },
-            {
-                "$set": {
-                    "state": "cancelled",
-                    "last_error": reason[:500],
-                    "updated_at": now,
-                    "purge_at": now + timedelta(days=7),
-                },
-                "$unset": {"worker_id": "", "lease_expires_at": ""},
-            },
+        res = await self.jobs.update_many(
+            {"tenant_id": str(tenant_id), "state": {"$in": ["queued", "running"]}},
+            {"$set": {"state": "cancelled", "last_error": str(reason), "updated_at": now}},
         )
-        return result.modified_count
+        return res.modified_count
 
-    async def get_job(self, tenant_id: str, job_id: str) -> dict[str, Any] | None:
-        return await self.jobs.find_one(
-            {"_id": job_id, "tenant_id": str(tenant_id)}, {"payload": 0}
+    async def get_job(self, job_id: str) -> dict[str, Any] | None:
+        return await self.jobs.find_one({"_id": str(job_id)})
+
+    async def get_platform_metadata(self, key: str) -> Any:
+        doc = await self.metadata.find_one({"_id": str(key)})
+        return doc.get("value") if doc else None
+
+    async def set_platform_metadata(self, key: str, value: Any) -> None:
+        await self.metadata.update_one(
+            {"_id": str(key)},
+            {"$set": {"value": value, "updated_at": utcnow()}},
+            upsert=True,
         )
-
-    async def get_platform_job(self, job_id: str) -> dict[str, Any] | None:
-        return await self.jobs.find_one({"_id": job_id}, {"payload": 0, "actor": 0})
-
-
-def _create_client() -> Any:
-    uri = CONFIG.database_url or "mongodb://localhost:27017"
-    safety_window_ms = (CONFIG.worker_lease_seconds - CONFIG.worker_heartbeat_seconds) * 1000
-    operation_timeout_ms = max(1_000, min(10_000, safety_window_ms // 2))
-    return motor.motor_asyncio.AsyncIOMotorClient(
-        uri,
-        tz_aware=True,
-        maxPoolSize=100,
-        minPoolSize=0,
-        connectTimeoutMS=operation_timeout_ms,
-        serverSelectionTimeoutMS=operation_timeout_ms,
-        socketTimeoutMS=operation_timeout_ms,
-        waitQueueTimeoutMS=operation_timeout_ms,
-        retryWrites=True,
-        retryReads=True,
-    )
 
 
 dbclient = _create_client()

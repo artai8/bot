@@ -1,1073 +1,825 @@
 (function () {
-  const { api, esc, toast, modal, closeModal, pagination, pollJob } = window.FSB;
+  window.FSB = window.FSB || {};
+  const FSB = window.FSB;
 
-  const JELLY_MAP = {
-    'users': 'j-users',
-    'share-nodes': 'j-sha(function () {
-  const { api, esc, toast, openModal, closeModal, navigate, pagination, pollJob } = window.FSB;
-
-  // 所有布尔型可选项开关
-  const boolFields = [
-    ['is_verify', '启用短链验证', '用户获取资源前需先完成一次短链跳转验证'],
-    ['protect_content', '默认禁止转发与另存', '向用户下发消息时开启 Telegram 原生防转发保护'],
-    ['show_promo', '显示底部推广语', '在机器人下发的说明末尾追加推广文案'],
-    ['disable_channel_button', '隐藏原始频道按钮', '下发文件时不附带默认频道跳转按钮'],
-    // 需求 1 可选项：强制订阅频道发送一条任意消息才能解锁
-    ['force_sub_require_msg', '需要在强制订阅的频道发送一条任意消息才能解锁（可选项）', '勾选后：用户除了加入强制订阅频道外，还必须在该频道或关联讨论群内发送至少一条任意消息才能解锁；不勾选则只需加入频道即可解锁'],
-    // 需求 2 可选项：不绑定强制订阅频道时的付费解锁总开关 + 4 种独立可选付费方式
-    ['pay_to_unlock', '不绑定强制订阅频道时启用「需要付费才能解锁」（可选项）', '当上方强制订阅频道列表为空时生效：勾选后用户需通过下方任一已勾选的付费方式完成解锁'],
-    ['pay_enable_stars', '方式一：Telegram Stars 官方星币支付（可选项）', '调用 Telegram 原生星币账单（XTR），用户支付后自动秒级解锁'],
-    ['pay_enable_usdt', '方式二：USDT 加密货币链上转账核销（可选项）', '向用户展示 USDT 收款网络与地址，支持发送 /tx <交易哈希> 自助核验解锁'],
-    ['pay_enable_cashier', '方式三：第三方在线收银台 / 聚合支付链接（可选项）', '跳转至发卡网或微信/支付宝聚合收银台，支持 Webhook 自动入账或购卡兑换'],
-    ['pay_enable_cdkey', '方式四：卡密 / 激活码 (CDKey) 兑换解锁（可选项）', '允许用户在对话框直接发送 CDK-XXXX 激活码或 /redeem 命令核销解锁']
+  const BOOL_FIELDS = [
+    { key: "is_verify", label: "开启短链验证 (is_verify)", hint: "要求用户完成短链广告验证后才可获取资源" },
+    { key: "protect_content", label: "全局防转发保护 (protect_content)", hint: "开启后机器人发送给用户的消息禁止转发和另存" },
+    { key: "disable_channel_button", label: "隐藏频道跳转按钮 (disable_channel_button)", hint: "隐藏资源消息下方的默认频道按钮" },
+    { key: "show_promo", label: "显示底部推广文案 (show_promo)", hint: "在发送的消息底部附加推广签名文案" },
+    { key: "force_sub_require_msg", label: "强关后需发言解锁 (force_sub_require_msg)", hint: "加入强关频道/群组后还需发送一条消息才可解锁" },
+    { key: "pay_to_unlock", label: "开启付费/卡密解锁 (pay_to_unlock)", hint: "要求用户完成Stars、USDT或卡密兑换后才可访问资源" },
+    { key: "pay_enable_stars", label: "启用 Telegram Stars 支付 (pay_enable_stars)", hint: "允许用户使用 Telegram Stars 解锁" },
+    { key: "pay_enable_usdt", label: "启用 USDT 支付验证 (pay_enable_usdt)", hint: "允许用户转账 USDT 并提交交易哈希解锁" },
+    { key: "pay_enable_cashier", label: "启用第三方收银台链接 (pay_enable_cashier)", hint: "显示自定义外部购买/收银台按钮" },
+    { key: "pay_enable_cdkey", label: "启用卡密 (CDKey) 兑换解锁 (pay_enable_cdkey)", hint: "允许用户使用卡密激活访问权限" },
   ];
 
-  const numberFields = [
-    ['verify_expire', '短链验证有效期 (秒)'],
-    ['auto_delete_time', '自动销毁秒数 (0=不销毁)'],
-    ['share_code_length', '分享码长度 (6-12)'],
-    ['rate_limit_max', '单用户限流次数'],
-    ['rate_limit_window', '限流时间窗口 (秒)'],
-    ['pay_unlock_expire', '付费解锁有效期 (秒，0=永久有效)'],
-    ['pay_amount_stars', 'Telegram Stars 星币解锁价格 (整数，如 50)']
+  const NUMBER_FIELDS = [
+    { key: "verify_expire", label: "短链验证有效期 (秒)", hint: "默认 86400 秒 (24小时)" },
+    { key: "auto_delete_time", label: "消息自动销毁时间 (秒)", hint: "0 表示不自动删除" },
+    { key: "share_code_length", label: "分享码随机长度 (4-32)", hint: "默认 8 位" },
+    { key: "rate_limit_max", label: "频率限制次数 (每窗口)", hint: "默认 10 次" },
+    { key: "rate_limit_window", label: "频率限制时间窗口 (秒)", hint: "默认 60 秒" },
+    { key: "pay_unlock_expire", label: "付费解锁有效期 (秒)", hint: "0 表示永久有效" },
+    { key: "pay_amount_stars", label: "Telegram Stars 价格 (颗)", hint: "默认 50" },
   ];
 
-  const paymentTextFields = [
-    ['pay_amount_usdt', 'USDT 解锁价格 (如 5.00)'],
-    ['pay_usdt_network', 'USDT 收款网络 (如 TRC20 / BEP20 / Arbitrum)'],
-    ['pay_usdt_address', 'USDT 收款钱包地址'],
-    ['pay_custom_url', '第三方在线收银台/发卡网 URL (支持 {user_id} 与 {tenant_id} 变量)']
+  const TEXT_FIELDS = [
+    { key: "shortlink_url", label: "短网址平台域名 (shortlink_url)", multiline: false },
+    { key: "shortlink_api", label: "短网址 API Key (shortlink_api)", multiline: false },
+    { key: "tutorial_video", label: "验证教程视频链接 (tutorial_video)", multiline: false },
+    { key: "keyword_button_text", label: "关键词按钮文字 (keyword_button_text)", multiline: false },
+    { key: "pay_amount_usdt", label: "USDT 价格金额 (pay_amount_usdt)", multiline: false },
+    { key: "pay_usdt_network", label: "USDT 网络类型 (如 TRC20 / BEP20)", multiline: false },
+    { key: "pay_usdt_address", label: "USDT 收款钱包地址 (pay_usdt_address)", multiline: false },
+    { key: "pay_custom_url", label: "发卡网/收银台链接 (pay_custom_url)", multiline: false },
+    { key: "custom_caption", label: "自定义附加说明文案 (custom_caption)", multiline: true },
+    { key: "custom_buttons", label: "自定义底部按钮配置 (每行: 按钮名 | 链接)", multiline: true },
+    { key: "promo_text", label: "推广签名文案 (promo_text)", multiline: true },
+    { key: "start_message", label: "欢迎语模板 (start_message)", multiline: true },
+    { key: "force_sub_message", label: "强制关注提示文案 (force_sub_message)", multiline: true },
+    { key: "force_sub_msg_prompt", label: "强制发言附加提示 (force_sub_msg_prompt)", multiline: true },
+    { key: "pay_unlock_message", label: "付费解锁提示文案 (pay_unlock_message)", multiline: true },
+    { key: "auto_delete_message", label: "自动删除倒计时提示文案 (auto_delete_message)", multiline: true },
+    { key: "user_reply_text", label: "普通用户私聊自动回复 (user_reply_text)", multiline: true },
+    { key: "about_text", label: "关于说明文案 (about_text)", multiline: true },
+    { key: "help_text", label: "帮助说明文案 (help_text)", multiline: true },
+    { key: "admin_help_text", label: "管理员指令说明文案 (admin_help_text)", multiline: true },
   ];
 
-  const textFields = [
-    ['shortlink_url', '短链服务域名 (如 example.com)', 1],
-    ['shortlink_api', '短链服务 API Key', 1],
-    ['tutorial_video', '验证教程链接 (URL)', 1],
-    ['promo_text', '底部推广语', 2],
-    ['custom_caption', '自定义文件说明模板', 2],
-    ['custom_buttons', '自定义底部按钮 (每行：按钮文字 - https://链接)', 2],
-    ['start_message', '欢迎语 (/start)', 3],
-    ['force_sub_message', '强制订阅提示语', 3],
-    ['force_sub_msg_prompt', '强制订阅附加「发送一条消息解锁」提示语', 2],
-    ['pay_unlock_message', '付费解锁提示语', 3],
-    ['auto_delete_message', '自动销毁提示语模板 (支持 {time})', 2],
-    ['user_reply_text', '非指令私聊默认回复文案', 2],
-    ['help_text', '普通用户帮助文案', 3],
-    ['admin_help_text', '管理员帮助文案', 3],
-    ['about_text', '关于文案 (/about)', 2],
-    ['keyword_button_text', '关键词按钮文字', 1]
-  ];
-
-  function channelValue(key) {
-    const el = document.getElementById('setting-' + key);
-    if (!el) return [];
-    return el.value
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((s) => Number(s))
-      .filter((n) => !Number.isNaN(n) && n !== 0);
+  function ensureTenantSelected() {
+    if (FSB.sessionRole === "platform" && !FSB.selectedTenantId) {
+      const container = document.getElementById("page-content");
+      if (container) {
+        container.innerHTML =
+          '<div class="card"><div class="card-body"><p class="text-muted">请先在左侧顶部下拉框中选择一个租户，或在「全部租户管理」中点击某个租户进行管理。</p></div></div>';
+      }
+      return false;
+    }
+    return true;
   }
 
-  // 1. 运行总览 Dashboard（100% 对齐 web/tenant_api.py 的 api_dashboard 返回结构）
-  async function dashboard(container) {
-    const data = await api('/api/dashboard');
-    const ctxEl = document.getElementById('sidebar-context');
-    if (ctxEl && data.tenant) {
-      ctxEl.textContent = data.tenant.display_name || data.tenant.slug || '';
-    }
-    const usersStat = data.users || {};
-    const sharesStat = data.shares || {};
-    const sys = data.system || {};
-    const botRunning = sys.status === 'running' || Boolean(sys.bot);
+  async function renderDashboard() {
+    if (!ensureTenantSelected()) return;
+    const container = document.getElementById("page-content");
+    const data = await FSB.api("/api/dashboard");
+    const t = data.tenant || {};
+    const u = data.users || {};
+    const s = data.shares || {};
+    const rt = data.runtime || {};
+    const rtStatus = rt.status || (t.enabled ? "starting" : "stopped");
+    const badgeClass =
+      rtStatus === "running" ? "badge-success" : t.enabled ? "badge-warning" : "badge-secondary";
 
     container.innerHTML = `
       <div class="stats-grid">
         <div class="stat-card">
-          <div class="stat-label">累计总用户 (7日新增: ${esc(String(usersStat.week ?? 0))})</div>
-          <div class="stat-value">${esc(String(usersStat.total ?? 0))}</div>
+          <div class="stat-label">总用户数</div>
+          <div class="stat-value">${FSB.formatNumber(u.total)}</div>
+          <div class="stat-sub">今日新增: ${FSB.formatNumber(u.today)} | 7日: ${FSB.formatNumber(u.week)}</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label">受控分享总数</div>
-          <div class="stat-value">${esc(String(sharesStat.total ?? 0))}</div>
+          <div class="stat-label">总分享合集/链接</div>
+          <div class="stat-value">${FSB.formatNumber(s.total)}</div>
+          <div class="stat-sub">今日新增: ${FSB.formatNumber(s.today)} | 7日: ${FSB.formatNumber(s.week)}</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label">累计分享访问次数</div>
-          <div class="stat-value">${esc(String(sharesStat.share_accessed ?? sharesStat.views ?? 0))}</div>
+          <div class="stat-label">已付费/卡密解锁用户</div>
+          <div class="stat-value">${FSB.formatNumber(u.unlocked || 0)}</div>
+          <div class="stat-sub">卡密总数: ${FSB.formatNumber(data.cdkeys_count || 0)}</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label">累计投递文件数</div>
-          <div class="stat-value">${esc(String(sharesStat.files_shared ?? sharesStat.downloads ?? 0))}</div>
+          <div class="stat-label">封禁黑名单用户</div>
+          <div class="stat-value">${FSB.formatNumber(data.banned || 0)}</div>
+          <div class="stat-sub">机器人状态: <span class="badge ${badgeClass}">${FSB.esc(rtStatus)}</span></div>
         </div>
       </div>
 
       <div class="card">
         <div class="card-header">
-          <h3>运行状态监控</h3>
+          <div class="card-title">当前租户核心信息 (${FSB.esc(t.display_name || t.slug)})</div>
+          <div class="btn-group">
+            <button class="btn btn-sm btn-primary" onclick="window.FSB.loadPage('settings')">修改配置与Bot参数</button>
+            <button class="btn btn-sm btn-secondary" onclick="window.FSB.restartTenantBot()">重启机器人实例</button>
+          </div>
         </div>
         <div class="card-body">
-          <div class="health-grid">
-            <div class="health-item">
-              <div class="health-label">Bot 进程状态</div>
-              <div class="health-value">
-                <span class="badge ${botRunning ? 'badge-success' : 'badge-neutral'}">
-                  ${botRunning ? '正常运行' : '未运行'}
-                </span>
-              </div>
-            </div>
-            <div class="health-item">
-              <div class="health-label">Bot 用户名</div>
-              <div class="health-value code-text">${sys.bot_username ? '@' + esc(sys.bot_username) : '-'}</div>
-            </div>
-            <div class="health-item">
-              <div class="health-label">数据库连接</div>
-              <div class="health-value code-text">${esc(sys.database || 'connected')}</div>
-            </div>
+          <div class="form-row">
+            <div><strong>租户账号 (Slug):</strong> ${FSB.esc(t.slug)}</div>
+            <div><strong>Bot 用户名:</strong> ${t.bot_username ? "@" + FSB.esc(t.bot_username) : "未获取"}</div>
+            <div><strong>Bot Token:</strong> ${FSB.esc(t.bot_token_hint || "尚未配置")}</div>
+            <div><strong>Owner Telegram ID:</strong> ${FSB.esc(t.owner_id || "尚未配置")}</div>
+            <div><strong>存储频道 ID:</strong> ${FSB.esc(t.db_channel_id || "尚未配置")}</div>
+            <div><strong>启用状态:</strong> ${t.enabled ? '<span class="badge badge-success">已启用</span>' : '<span class="badge badge-warning">未启用</span>'}</div>
           </div>
-          ${sys.last_error ? `<div class="alert alert-danger margin-top-md">${esc(sys.last_error)}</div>` : ''}
+          ${rt.last_error ? `<div style="margin-top:12px;color:#f87171;">最近运行错误: ${FSB.esc(rt.last_error)}</div>` : ""}
         </div>
       </div>
     `;
   }
 
-  // 2. 用户列表 Users（对齐 /api/users 返回结构并支持查看发言/付费解锁状态与手动授权）
-  async function users(container, page = 1) {
-    const data = await api(`/api/users?page=${page}`);
-    const list = data.users || data.items || [];
-    container.innerHTML = `
-      <div class="card table-card">
-        <div class="card-header">
-          <h3>访问用户列表</h3>
-          <span class="text-muted">共 ${esc(String(data.total ?? list.length))} 名用户</span>
-        </div>
-        <div class="card-body" style="padding:0">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Telegram User ID</th>
-                <th>频道订阅 / 发言状态</th>
-                <th>付费解锁状态</th>
-                <th style="text-align:right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${list.map((u, i) => {
-                const fsub = u.force_sub_status || {};
-                const paid = u.paid_status || {};
-                const msgCount = (fsub.msg_sent_channels || []).length;
-                return `
-                  <tr>
-                    <td class="code-text">${(page - 1) * (data.per_page || 20) + i + 1}</td>
-                    <td><code class="code-text">${esc(String(u.user_id))}</code></td>
-                    <td>
-                      <span class="badge ${fsub.verified ? 'badge-success' : 'badge-neutral'}">
-                        ${fsub.verified ? '已通过' : '未验证'}
-                      </span>
-                      ${msgCount > 0 ? `<span class="badge badge-info">已发言 (${msgCount})</span>` : ''}
-                    </td>
-                    <td>
-                      <span class="badge ${paid.is_unlocked ? 'badge-success' : 'badge-neutral'}">
-                        ${paid.is_unlocked ? `已解锁 (${esc(paid.method || 'manual')})` : '未解锁'}
-                      </span>
-                    </td>
-                    <td style="text-align:right">
-                      <div class="table-actions">
-                        <button type="button" class="btn btn-ghost btn-sm" onclick="Tenant.toggleUserUnlock('${esc(String(u.user_id))}', ${!paid.is_unlocked})">
-                          ${paid.is_unlocked ? '撤销付费解锁' : '手动授予解锁'}
-                        </button>
-                        <button type="button" class="btn btn-danger btn-sm" onclick="Tenant.banModal('${esc(String(u.user_id))}')">封禁</button>
-                      </div>
-                    </td>
-                  </tr>
-                `;
-              }).join('') || '<tr><td colspan="5" class="empty-state">暂无用户数据</td></tr>'}
-            </tbody>
-          </table>
-        </div>
-      </div>
-      ${pagination ? pagination(data.page || page, data.total_pages || 1, 'Tenant.usersPage') : ''}
-    `;
-  }
-
-  function usersPage(page) {
-    return users(document.getElementById('page-content'), page);
-  }
-
-  async function toggleUserUnlock(userId, unlock) {
+  async function restartTenantBot() {
     try {
-      await api(`/api/users/${encodeURIComponent(userId)}/unlock`, {
-        method: 'POST',
-        body: JSON.stringify({ unlocked: Boolean(unlock), method: 'admin_manual' })
-      });
-      toast(unlock ? `已为用户 ${userId} 授予解锁权限` : `已撤销用户 ${userId} 的解锁权限`, 'success');
-      usersPage(1);
-    } catch (error) {
-      toast(error.message, 'error');
+      await FSB.api("/api/tenant/restart", { method: "POST" });
+      FSB.toast("已发送重启机器人指令", "success");
+      setTimeout(renderDashboard, 1000);
+    } catch (err) {
+      FSB.toast(err.message, "error");
     }
   }
 
-  // 3. 分享管理 Shares（100% 对齐 /api/shares 与 /api/shares/{code}）
-  async function shares(container, page = 1, search = '') {
-    const data = await api(`/api/shares?page=${page}&search=${encodeURIComponent(search)}`);
-    const list = data.shares || data.items || [];
+  async function renderSettings() {
+    if (!ensureTenantSelected()) return;
+    const container = document.getElementById("page-content");
+    const cfg = await FSB.api("/api/settings");
+
+    const boolHtml = BOOL_FIELDS.map(function (f) {
+      const checked = cfg[f.key] ? "checked" : "";
+      return `
+        <div class="form-check">
+          <input type="checkbox" id="cfg-${f.key}" data-key="${f.key}" ${checked} />
+          <div>
+            <label for="cfg-${f.key}" style="margin:0;cursor:pointer;">${FSB.esc(f.label)}</label>
+            <div class="form-hint">${FSB.esc(f.hint)}</div>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    const numHtml = NUMBER_FIELDS.map(function (f) {
+      const val = cfg[f.key] !== undefined ? cfg[f.key] : 0;
+      return `
+        <div class="form-group">
+          <label for="cfg-${f.key}">${FSB.esc(f.label)}</label>
+          <input type="number" id="cfg-${f.key}" class="form-control" value="${FSB.esc(val)}" />
+          <div class="form-hint">${FSB.esc(f.hint)}</div>
+        </div>
+      `;
+    }).join("");
+
+    const textHtml = TEXT_FIELDS.map(function (f) {
+      const val = cfg[f.key] !== undefined ? cfg[f.key] : "";
+      if (f.multiline) {
+        return `
+          <div class="form-group">
+            <label for="cfg-${f.key}">${FSB.esc(f.label)}</label>
+            <textarea id="cfg-${f.key}" class="form-control">${FSB.esc(val)}</textarea>
+          </div>
+        `;
+      }
+      return `
+        <div class="form-group">
+          <label for="cfg-${f.key}">${FSB.esc(f.label)}</label>
+          <input type="text" id="cfg-${f.key}" class="form-control" value="${FSB.esc(val)}" />
+        </div>
+      `;
+    }).join("");
+
+    const forceSubStr = Array.isArray(cfg.force_sub_channels) ? cfg.force_sub_channels.join(", ") : "";
+    const boundStr = Array.isArray(cfg.bound_channels) ? cfg.bound_channels.join(", ") : "";
+    const adminIdsStr = Array.isArray(cfg.admin_ids) ? cfg.admin_ids.join(", ") : "";
+
     container.innerHTML = `
-      <div class="page-actions" style="margin-bottom:14px">
-        <div class="search-box">
-          <input class="form-input" id="share-search" placeholder="按标题或分享 Key 搜索..." value="${esc(search)}" onkeydown="if(event.key==='Enter')Tenant.searchShares()">
-          <button type="button" class="btn btn-ghost" onclick="Tenant.searchShares()">搜索</button>
+      <form id="tenant-full-settings-form">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">1. 租户基础信息与机器人核心配置</div>
+            <button type="submit" class="btn btn-primary">保存全部设置</button>
+          </div>
+          <div class="card-body">
+            <div class="form-row">
+              <div class="form-group">
+                <label>租户登录账号标识 (Slug)</label>
+                <input type="text" id="core-slug" class="form-control" value="${FSB.esc(cfg.slug || "")}" />
+              </div>
+              <div class="form-group">
+                <label>租户显示名称</label>
+                <input type="text" id="core-display-name" class="form-control" value="${FSB.esc(cfg.display_name || "")}" />
+              </div>
+              <div class="form-group">
+                <label>修改租户登录密码 (留空则不修改)</label>
+                <input type="password" id="core-web-password" class="form-control" placeholder="输入新密码以修改" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Telegram Bot Token (当前: ${FSB.esc(cfg.bot_token_hint || "未设置")})</label>
+                <input type="text" id="core-bot-token" class="form-control" placeholder="留空保持不变，输入新 Token 则覆盖" />
+              </div>
+              <div class="form-group">
+                <label>Bot 用户名 (选填，如 my_share_bot)</label>
+                <input type="text" id="core-bot-username" class="form-control" value="${FSB.esc(cfg.bot_username || "")}" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Owner Telegram 用户 ID (必填以启用)</label>
+                <input type="number" id="core-owner-id" class="form-control" value="${FSB.esc(cfg.owner_id || 0)}" />
+              </div>
+              <div class="form-group">
+                <label>存储数据库频道 ID (必填，如 -100123456789)</label>
+                <input type="number" id="core-db-channel-id" class="form-control" value="${FSB.esc(cfg.db_channel_id || 0)}" />
+              </div>
+              <div class="form-group">
+                <label>附加管理员 Telegram ID 列表 (逗号分隔)</label>
+                <input type="text" id="core-admin-ids" class="form-control" value="${FSB.esc(adminIdsStr)}" />
+              </div>
+            </div>
+            <div class="form-check">
+              <input type="checkbox" id="core-enabled" ${cfg.enabled ? "checked" : ""} />
+              <label for="core-enabled" style="margin:0;cursor:pointer;"><strong>启用并运行该租户的 Telegram 机器人实例</strong>（需填妥 Bot Token、Owner ID 与存储频道 ID）</label>
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="card table-card">
-        <div class="card-header">
-          <h3>受控分享列表</h3>
-          <span class="text-muted">共 ${esc(String(data.total ?? list.length))} 条记录</span>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">2. 频道绑定与强制关注设置</div>
+          </div>
+          <div class="card-body">
+            <div class="form-row">
+              <div class="form-group">
+                <label>强制关注频道/群组 ID 列表 (force_sub_channels，多个用逗号分隔)</label>
+                <input type="text" id="cfg-force_sub_channels" class="form-control" value="${FSB.esc(forceSubStr)}" placeholder="-1001111111, -1002222222" />
+              </div>
+              <div class="form-group">
+                <label>自动监听并生成链接的绑定频道 ID 列表 (bound_channels，逗号分隔)</label>
+                <input type="text" id="cfg-bound_channels" class="form-control" value="${FSB.esc(boundStr)}" placeholder="-1003333333" />
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="card-body" style="padding:0">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>标题 / 文件名</th>
-                <th>Key</th>
-                <th>文件数</th>
-                <th>防转发</th>
-                <th>访问次数</th>
-                <th style="text-align:right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${list.map((s) => {
-                const sid = s.code || s.id || s.key;
-                return `
-                  <tr>
-                    <td><strong>${esc(s.title || s.file_name || 'Untitled')}</strong></td>
-                    <td><span class="code-text">${esc(sid)}</span></td>
-                    <td class="code-text">${esc(String(s.files_count ?? (s.message_ids || []).length ?? 1))}</td>
-                    <td>
-                      <span class="badge ${s.protect_content ? 'badge-info' : 'badge-neutral'}">
-                        ${s.protect_content ? '禁止转发' : '允许'}
-                      </span>
-                    </td>
-                    <td class="code-text">${esc(String(s.access_count ?? s.views ?? 0))}</td>
-                    <td style="text-align:right">
-                      <div class="table-actions">
-                        <button type="button" class="btn btn-ghost btn-sm" onclick="Tenant.editShare('${esc(sid)}')">编辑</button>
-                        <button type="button" class="btn btn-ghost btn-sm" onclick="Tenant.forwardShare('${esc(sid)}')">频道群发</button>
-                        <button type="button" class="btn btn-danger btn-sm" onclick="Tenant.removeShare('${esc(sid)}')">删除</button>
-                      </div>
-                    </td>
-                  </tr>
-                `;
-              }).join('') || '<tr><td colspan="6" class="empty-state">暂无受控分享数据</td></tr>'}
-            </tbody>
-          </table>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">3. 功能开关配置</div>
+          </div>
+          <div class="card-body">
+            ${boolHtml}
+          </div>
         </div>
-      </div>
-      ${pagination ? pagination(data.page || page, data.total_pages || 1, 'Tenant.sharesPage') : ''}
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">4. 数值与限流参数配置</div>
+          </div>
+          <div class="card-body">
+            <div class="form-row">
+              ${numHtml}
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">5. 消息文案、短链与支付收款详细设置</div>
+            <button type="submit" class="btn btn-primary">保存全部设置</button>
+          </div>
+          <div class="card-body">
+            ${textHtml}
+          </div>
+        </div>
+      </form>
     `;
+
+    const form = document.getElementById("tenant-full-settings-form");
+    if (form) {
+      form.addEventListener("submit", async function (e) {
+        e.preventDefault();
+        await saveAllSettings();
+      });
+    }
   }
 
-  function sharesPage(page) {
-    const q = document.getElementById('share-search')?.value || '';
-    return shares(document.getElementById('page-content'), page, q);
+  async function saveAllSettings() {
+    const payload = {
+      slug: document.getElementById("core-slug").value.trim(),
+      display_name: document.getElementById("core-display-name").value.trim(),
+      owner_id: Number(document.getElementById("core-owner-id").value || 0),
+      db_channel_id: Number(document.getElementById("core-db-channel-id").value || 0),
+      admin_ids: document.getElementById("core-admin-ids").value,
+      bot_username: document.getElementById("core-bot-username").value.trim(),
+      enabled: document.getElementById("core-enabled").checked,
+      force_sub_channels: document.getElementById("cfg-force_sub_channels").value,
+      bound_channels: document.getElementById("cfg-bound_channels").value,
+    };
+
+    const newPw = document.getElementById("core-web-password").value;
+    if (newPw && newPw.trim()) payload.web_password = newPw.trim();
+
+    const newTok = document.getElementById("core-bot-token").value;
+    if (newTok && newTok.trim()) payload.bot_token = newTok.trim();
+
+    BOOL_FIELDS.forEach(function (f) {
+      const el = document.getElementById("cfg-" + f.key);
+      if (el) payload[f.key] = el.checked;
+    });
+
+    NUMBER_FIELDS.forEach(function (f) {
+      const el = document.getElementById("cfg-" + f.key);
+      if (el) payload[f.key] = Number(el.value || 0);
+    });
+
+    TEXT_FIELDS.forEach(function (f) {
+      const el = document.getElementById("cfg-" + f.key);
+      if (el) payload[f.key] = el.value;
+    });
+
+    try {
+      FSB.showLoading(true);
+      await FSB.api("/api/settings", { method: "PUT", body: payload });
+      FSB.toast("所有设置已成功保存", "success");
+      if (FSB.sessionRole === "platform" && FSB.refreshAdminTenantSelector) {
+        await FSB.refreshAdminTenantSelector();
+      }
+      await renderSettings();
+    } catch (err) {
+      FSB.toast(err.message, "error");
+    } finally {
+      FSB.showLoading(false);
+    }
+  }
+
+  async function renderShares(page, search) {
+    if (!ensureTenantSelected()) return;
+    page = page || 1;
+    search = search !== undefined ? search : "";
+    const container = document.getElementById("page-content");
+    const q = new URLSearchParams({ page: String(page), per_page: "20" });
+    if (search) q.set("search", search);
+    const data = await FSB.api("/api/shares?" + q.toString());
+    const items = data.shares || [];
+
+    const rows = items
+      .map(function (s) {
+        const kw = (s.keywords || []).join(", ");
+        return `
+          <tr>
+            <td><code>${FSB.esc(s.code)}</code></td>
+            <td>${FSB.esc(s.title || "-")}</td>
+            <td>${FSB.formatNumber(s.file_count)} (${FSB.esc((s.message_ids || []).slice(0, 5).join(","))})</td>
+            <td>${FSB.esc(kw || "-")}</td>
+            <td>${s.protect_content ? '<span class="badge badge-warning">防转发</span>' : '<span class="badge badge-secondary">普通</span>'}</td>
+            <td>${FSB.formatNumber(s.access_count)}</td>
+            <td>${FSB.formatDate(s.created_at)}</td>
+            <td>
+              <div class="btn-group">
+                <button class="btn btn-sm btn-secondary" onclick="window.FSB.openEditShareModal('${FSB.esc(s.code)}')">编辑</button>
+                <button class="btn btn-sm btn-danger" onclick="window.FSB.deleteShare('${FSB.esc(s.code)}')">删除</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    container.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">分享链接与合集数据 (${FSB.formatNumber(data.total || 0)})</div>
+          <div class="btn-group">
+            <input type="text" id="share-search-input" class="form-control form-control-sm" style="width:200px;" placeholder="搜索分享码/标题/关键词" value="${FSB.esc(search)}" />
+            <button class="btn btn-sm btn-secondary" onclick="window.FSB.searchShares()">搜索</button>
+            <button class="btn btn-sm btn-primary" onclick="window.FSB.openCreateShareModal()">+ 新增分享</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="table-responsive">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>分享码 (Code)</th>
+                  <th>标题</th>
+                  <th>文件数 / 消息ID</th>
+                  <th>搜索关键词</th>
+                  <th>保护状态</th>
+                  <th>访问次数</th>
+                  <th>创建时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows || '<tr><td colspan="8" class="text-muted">暂无分享数据</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   function searchShares() {
-    const q = document.getElementById('share-search')?.value || '';
-    return shares(document.getElementById('page-content'), 1, q);
+    const val = (document.getElementById("share-search-input") || {}).value || "";
+    renderShares(1, val.trim());
   }
 
-  async function editShare(id) {
-    const item = await api(`/api/shares/${encodeURIComponent(id)}`);
-    openModal(
-      '编辑分享设置',
-      `
-        <div class="form-group">
-          <label class="form-label">标题 / 名称</label>
-          <input class="form-input" id="edit-title" value="${esc(item.title || item.file_name || '')}">
-        </div>
-        <div class="form-group">
-          <label class="form-label">触发关键词（逗号分隔）</label>
-          <input class="form-input" id="edit-keywords" value="${esc((item.keywords || []).join(','))}">
-        </div>
-        <div class="form-group">
-          <label class="form-label">群发说明文案</label>
-          <textarea class="form-textarea" id="edit-grouptext" rows="3">${esc(item.group_text || '')}</textarea>
-        </div>
-        <label class="setting-item">
-          <div class="setting-item-text">
-            <span class="setting-item-title">禁止转发与另存</span>
-          </div>
-          <input type="checkbox" id="edit-protect" ${item.protect_content ? 'checked' : ''}>
-        </label>
-      `,
-      `<button type="button" class="btn btn-ghost" onclick="FSB.closeModal()">取消</button>
-       <button type="button" class="btn btn-accent" onclick="Tenant.saveShare('${esc(id)}')">保存</button>`
-    );
+  function openCreateShareModal() {
+    const body = `
+      <div class="form-group">
+        <label>存储频道中的消息 ID 列表 (必填，多个用逗号或空格分隔)</label>
+        <input type="text" id="modal-share-mids" class="form-control" placeholder="例如: 101, 102, 103" />
+      </div>
+      <div class="form-group">
+        <label>自定义分享码 (选填，留空自动随机生成)</label>
+        <input type="text" id="modal-share-code" class="form-control" placeholder="例如: vippack01" />
+      </div>
+      <div class="form-group">
+        <label>合集标题</label>
+        <input type="text" id="modal-share-title" class="form-control" placeholder="资源标题" />
+      </div>
+      <div class="form-group">
+        <label>搜索关键词 (逗号分隔)</label>
+        <input type="text" id="modal-share-keywords" class="form-control" placeholder="关键词1, 关键词2" />
+      </div>
+      <div class="form-group">
+        <label>群组展示文案 (group_text)</label>
+        <textarea id="modal-share-group-text" class="form-control"></textarea>
+      </div>
+      <div class="form-check">
+        <input type="checkbox" id="modal-share-protect" />
+        <label for="modal-share-protect" style="margin:0;">开启防转发保护 (protect_content)</label>
+      </div>
+    `;
+    const footer = `
+      <button class="btn btn-secondary" onclick="window.FSB.closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="window.FSB.submitCreateShare()">创建分享</button>
+    `;
+    FSB.renderModal("新增分享资源", body, footer);
   }
 
-  async function saveShare(id) {
+  async function submitCreateShare() {
     const payload = {
-      title: document.getElementById('edit-title')?.value?.trim() || '',
-      keywords: document.getElementById('edit-keywords')?.value || '',
-      group_text: document.getElementById('edit-grouptext')?.value || '',
-      protect_content: Boolean(document.getElementById('edit-protect')?.checked)
+      message_ids: document.getElementById("modal-share-mids").value,
+      code: document.getElementById("modal-share-code").value.trim(),
+      title: document.getElementById("modal-share-title").value.trim(),
+      keywords: document.getElementById("modal-share-keywords").value,
+      group_text: document.getElementById("modal-share-group-text").value,
+      protect_content: document.getElementById("modal-share-protect").checked,
     };
     try {
-      await api(`/api/shares/${encodeURIComponent(id)}`, {
-        method: 'PUT',
-        body: JSON.stringify(payload)
-      });
-      toast('分享设置已保存', 'success');
-      closeModal();
-      if (navigate) navigate('shares');
-      else sharesPage(1);
-    } catch (error) {
-      toast(error.message, 'error');
+      await FSB.api("/api/shares", { method: "POST", body: payload });
+      FSB.closeModal();
+      FSB.toast("分享创建成功", "success");
+      await renderShares(1);
+    } catch (err) {
+      FSB.toast(err.message, "error");
     }
   }
 
-  function forwardShare(id) {
-    openModal(
-      '推送分享到绑定频道',
-      `
-        <label class="setting-item">
-          <div class="setting-item-text">
-            <span class="setting-item-title">推送全部文件作为预览</span>
-            <span class="setting-item-desc">不勾选则按下方预览数量抽取前几条</span>
-          </div>
-          <input type="checkbox" id="forward-all">
-        </label>
+  async function openEditShareModal(code) {
+    try {
+      const s = await FSB.api("/api/shares/" + encodeURIComponent(code));
+      const body = `
         <div class="form-group">
-          <label class="form-label">抽取预览文件数量</label>
-          <input class="form-input" type="number" id="forward-count" value="2" min="1" max="10">
+          <label>分享码</label>
+          <input type="text" class="form-control" value="${FSB.esc(s.code)}" disabled />
         </div>
-      `,
-      `<button type="button" class="btn btn-ghost" onclick="FSB.closeModal()">取消</button>
-       <button type="button" class="btn btn-accent" onclick="Tenant.runForward('${esc(id)}')">立即推送</button>`
-    );
-  }
-
-  async function runForward(id) {
-    const forward_all = Boolean(document.getElementById('forward-all')?.checked);
-    const forward_count = Number(document.getElementById('forward-count')?.value || 2);
-    try {
-      await api(`/api/shares/${encodeURIComponent(id)}/forward`, {
-        method: 'POST',
-        body: JSON.stringify({ forward_all, forward_count })
-      });
-      toast('已提交频道推送任务', 'success');
-      closeModal();
-    } catch (error) {
-      toast(error.message, 'error');
+        <div class="form-group">
+          <label>消息 ID 列表 (逗号分隔)</label>
+          <input type="text" id="edit-share-mids" class="form-control" value="${FSB.esc((s.message_ids || []).join(", "))}" />
+        </div>
+        <div class="form-group">
+          <label>标题</label>
+          <input type="text" id="edit-share-title" class="form-control" value="${FSB.esc(s.title || "")}" />
+        </div>
+        <div class="form-group">
+          <label>搜索关键词 (逗号分隔)</label>
+          <input type="text" id="edit-share-keywords" class="form-control" value="${FSB.esc((s.keywords || []).join(", "))}" />
+        </div>
+        <div class="form-group">
+          <label>群组展示文案</label>
+          <textarea id="edit-share-group-text" class="form-control">${FSB.esc(s.group_text || "")}</textarea>
+        </div>
+        <div class="form-check">
+          <input type="checkbox" id="edit-share-protect" ${s.protect_content ? "checked" : ""} />
+          <label for="edit-share-protect" style="margin:0;">开启防转发保护</label>
+        </div>
+      `;
+      const footer = `
+        <button class="btn btn-secondary" onclick="window.FSB.closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="window.FSB.submitEditShare('${FSB.esc(s.code)}')">保存修改</button>
+      `;
+      FSB.renderModal("编辑分享: " + s.code, body, footer);
+    } catch (err) {
+      FSB.toast(err.message, "error");
     }
   }
 
-  function removeShare(id) {
-    openModal(
-      '确认删除分享',
-      `<p style="color:var(--text-secondary)">确定要删除分享码 <code class="code-text">${esc(id)}</code> 吗？删除后对应链接将立即失效。</p>`,
-      `<button type="button" class="btn btn-ghost" onclick="FSB.closeModal()">取消</button>
-       <button type="button" class="btn btn-danger" onclick="Tenant.confirmRemoveShare('${esc(id)}')">确认删除</button>`
-    );
-  }
-
-  async function confirmRemoveShare(id) {
+  async function submitEditShare(code) {
+    const payload = {
+      message_ids: document.getElementById("edit-share-mids").value,
+      title: document.getElementById("edit-share-title").value,
+      keywords: document.getElementById("edit-share-keywords").value,
+      group_text: document.getElementById("edit-share-group-text").value,
+      protect_content: document.getElementById("edit-share-protect").checked,
+    };
     try {
-      await api(`/api/shares/${encodeURIComponent(id)}`, { method: 'DELETE' });
-      toast('分享已删除', 'success');
-      closeModal();
-      if (navigate) navigate('shares');
-      else sharesPage(1);
-    } catch (error) {
-      toast(error.message, 'error');
+      await FSB.api("/api/shares/" + encodeURIComponent(code), { method: "PUT", body: payload });
+      FSB.closeModal();
+      FSB.toast("分享已更新", "success");
+      await renderShares(1);
+    } catch (err) {
+      FSB.toast(err.message, "error");
     }
   }
 
-  // 4. 广播消息 Broadcast（对齐 POST /api/broadcast 的 { message } 字段）
-  function broadcast(container) {
+  async function deleteShare(code) {
+    if (!confirm("确定要删除分享码 " + code + " 吗？")) return;
+    try {
+      await FSB.api("/api/shares/" + encodeURIComponent(code), { method: "DELETE" });
+      FSB.toast("分享已删除", "success");
+      await renderShares(1);
+    } catch (err) {
+      FSB.toast(err.message, "error");
+    }
+  }
+
+  async function renderUsers(page, search) {
+    if (!ensureTenantSelected()) return;
+    page = page || 1;
+    search = search || "";
+    const container = document.getElementById("page-content");
+    const q = new URLSearchParams({ page: String(page), per_page: "20" });
+    if (search) q.set("search", search);
+    const data = await FSB.api("/api/users?" + q.toString());
+    const users = data.users || [];
+
+    const rows = users
+      .map(function (u) {
+        const unlocked = u.paid_status && u.paid_status.is_unlocked;
+        return `
+          <tr>
+            <td><code>${FSB.esc(u.user_id)}</code></td>
+            <td>${FSB.formatDate(u.joined_at)}</td>
+            <td>${unlocked ? '<span class="badge badge-success">已解锁 (' + FSB.esc(u.paid_status.method || "manual") + ')</span>' : '<span class="badge badge-secondary">未解锁</span>'}</td>
+            <td>${u.is_banned ? '<span class="badge badge-danger">已封禁: ' + FSB.esc(u.ban_reason) + '</span>' : '<span class="badge badge-success">正常</span>'}</td>
+            <td>
+              <div class="btn-group">
+                <button class="btn btn-sm ${unlocked ? "btn-warning" : "btn-success"}" onclick="window.FSB.toggleUserUnlock(${u.user_id}, ${!unlocked})">${unlocked ? "取消解锁" : "手动解锁"}</button>
+                ${
+                  u.is_banned
+                    ? `<button class="btn btn-sm btn-secondary" onclick="window.FSB.unbanUser(${u.user_id})">解封</button>`
+                    : `<button class="btn btn-sm btn-danger" onclick="window.FSB.banUser(${u.user_id})">封禁</button>`
+                }
+                <button class="btn btn-sm btn-danger" onclick="window.FSB.deleteUserRecord(${u.user_id})">删除数据</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+
     container.innerHTML = `
       <div class="card">
         <div class="card-header">
-          <h3>全员广播消息</h3>
-          <span class="text-muted">由后台异步队列限流发送</span>
+          <div class="card-title">用户数据与权限管理 (${FSB.formatNumber(data.total || 0)})</div>
+          <div class="btn-group">
+            <input type="text" id="user-search-input" class="form-control form-control-sm" style="width:180px;" placeholder="按 Telegram ID 搜索" value="${FSB.esc(search)}" />
+            <button class="btn btn-sm btn-secondary" onclick="window.FSB.searchUsers()">搜索</button>
+            <button class="btn btn-sm btn-primary" onclick="window.FSB.openAddUserModal()">+ 手动添加用户</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="table-responsive">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Telegram 用户 ID</th>
+                  <th>加入时间</th>
+                  <th>付费/卡密解锁状态</th>
+                  <th>账号状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows || '<tr><td colspan="5" class="text-muted">暂无用户数据</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function searchUsers() {
+    const val = (document.getElementById("user-search-input") || {}).value || "";
+    renderUsers(1, val.trim());
+  }
+
+  function openAddUserModal() {
+    const body = `
+      <div class="form-group">
+        <label>Telegram 用户 ID *</label>
+        <input type="number" id="modal-add-uid" class="form-control" placeholder="例如 123456789" />
+      </div>
+      <div class="form-check">
+        <input type="checkbox" id="modal-add-unlocked" checked />
+        <label for="modal-add-unlocked" style="margin:0;">同时赋予付费解锁权限</label>
+      </div>
+    `;
+    const footer = `
+      <button class="btn btn-secondary" onclick="window.FSB.closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="window.FSB.submitAddUser()">确认添加</button>
+    `;
+    FSB.renderModal("手动添加用户数据", body, footer);
+  }
+
+  async function submitAddUser() {
+    const uid = Number(document.getElementById("modal-add-uid").value || 0);
+    const unlocked = document.getElementById("modal-add-unlocked").checked;
+    try {
+      await FSB.api("/api/users", { method: "POST", body: { user_id: uid, unlocked: unlocked } });
+      FSB.closeModal();
+      FSB.toast("用户已添加", "success");
+      await renderUsers(1);
+    } catch (err) {
+      FSB.toast(err.message, "error");
+    }
+  }
+
+  async function toggleUserUnlock(uid, unlocked) {
+    try {
+      await FSB.api("/api/users/" + uid + "/unlock", {
+        method: "POST",
+        body: { unlocked: unlocked },
+      });
+      FSB.toast("用户解锁状态已更新", "success");
+      await renderUsers(1);
+    } catch (err) {
+      FSB.toast(err.message, "error");
+    }
+  }
+
+  async function banUser(uid) {
+    const reason = prompt("请输入封禁原因（选填）：", "违反规则");
+    if (reason === null) return;
+    try {
+      await FSB.api("/api/ban", { method: "POST", body: { user_id: uid, reason: reason } });
+      FSB.toast("已封禁用户 " + uid, "success");
+      await renderUsers(1);
+    } catch (err) {
+      FSB.toast(err.message, "error");
+    }
+  }
+
+  async function unbanUser(uid) {
+    try {
+      await FSB.api("/api/unban", { method: "POST", body: { user_id: uid } });
+      FSB.toast("已解封用户 " + uid, "success");
+      await renderUsers(1);
+    } catch (err) {
+      FSB.toast(err.message, "error");
+    }
+  }
+
+  async function deleteUserRecord(uid) {
+    if (!confirm("确定要彻底删除用户 " + uid + " 的记录吗？")) return;
+    try {
+      await FSB.api("/api/users/" + uid, { method: "DELETE" });
+      FSB.toast("已删除用户记录", "success");
+      await renderUsers(1);
+    } catch (err) {
+      FSB.toast(err.message, "error");
+    }
+  }
+
+  async function renderCDKeys() {
+    if (!ensureTenantSelected()) return;
+    const container = document.getElementById("page-content");
+    const data = await FSB.api("/api/cdkeys");
+    const items = data.items || [];
+
+    const rows = items
+      .map(function (c) {
+        const used = c.used_by !== null && c.used_by !== undefined;
+        return `
+          <tr>
+            <td><code>${FSB.esc(c.code)}</code></td>
+            <td>${FSB.esc(c.note || "-")}</td>
+            <td>${used ? '<span class="badge badge-secondary">已使用 (' + FSB.esc(c.used_by) + ")</span>" : '<span class="badge badge-success">未使用</span>'}</td>
+            <td>${FSB.formatDate(c.created_at)}</td>
+            <td>${c.used_at ? FSB.formatDate(c.used_at) : "-"}</td>
+            <td>
+              <button class="btn btn-sm btn-danger" onclick="window.FSB.deleteCDKey('${FSB.esc(c.code)}')">删除</button>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    container.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">卡密 (CDKey) 管理 (${FSB.formatNumber(items.length)})</div>
+          <div class="btn-group">
+            <input type="number" id="cdk-gen-count" class="form-control form-control-sm" style="width:100px;" value="10" min="1" max="200" />
+            <input type="text" id="cdk-gen-note" class="form-control form-control-sm" style="width:160px;" placeholder="备注(选填)" />
+            <button class="btn btn-sm btn-primary" onclick="window.FSB.generateCDKeys()">批量生成卡密</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="table-responsive">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>卡密代码 (Code)</th>
+                  <th>备注</th>
+                  <th>状态 / 使用者</th>
+                  <th>创建时间</th>
+                  <th>使用时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows || '<tr><td colspan="6" class="text-muted">暂无卡密数据</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  async function generateCDKeys() {
+    const count = Number((document.getElementById("cdk-gen-count") || {}).value || 10);
+    const note = ((document.getElementById("cdk-gen-note") || {}).value || "").trim();
+    try {
+      const res = await FSB.api("/api/cdkeys", { method: "POST", body: { count: count, note: note } });
+      FSB.toast("成功生成 " + (res.codes || []).length + " 张卡密", "success");
+      await renderCDKeys();
+    } catch (err) {
+      FSB.toast(err.message, "error");
+    }
+  }
+
+  async function deleteCDKey(code) {
+    try {
+      await FSB.api("/api/cdkeys/" + encodeURIComponent(code), { method: "DELETE" });
+      FSB.toast("卡密已删除", "success");
+      await renderCDKeys();
+    } catch (err) {
+      FSB.toast(err.message, "error");
+    }
+  }
+
+  async function renderBroadcast() {
+    if (!ensureTenantSelected()) return;
+    const container = document.getElementById("page-content");
+    container.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">向租户全体用户广播消息</div>
         </div>
         <div class="card-body">
           <div class="form-group">
-            <label class="form-label">广播内容（支持 HTML 格式）</label>
-            <textarea class="form-textarea" id="broadcast-message" rows="5" placeholder="输入广播消息内容..."></textarea>
+            <label>广播内容 (支持 HTML 格式标签)</label>
+            <textarea id="broadcast-msg-input" class="form-control" style="min-height:140px;" placeholder="请输入要广播给所有用户的消息内容..."></textarea>
           </div>
-          <button type="button" class="btn btn-accent" onclick="Tenant.sendBroadcast()">提交广播任务</button>
-          <div id="broadcast-progress" class="code-text margin-top-md"></div>
+          <button class="btn btn-primary" onclick="window.FSB.submitBroadcast()">立即发送广播</button>
+          <div id="broadcast-status-box" style="margin-top:16px;"></div>
         </div>
       </div>
     `;
   }
 
-  async function sendBroadcast() {
-    const message = document.getElementById('broadcast-message')?.value?.trim();
-    if (!message) return toast('请输入广播内容', 'error');
+  async function submitBroadcast() {
+    const msg = (document.getElementById("broadcast-msg-input") || {}).value || "";
+    if (!msg.trim()) {
+      FSB.toast("请输入广播内容", "error");
+      return;
+    }
     try {
-      const res = await api('/api/broadcast', {
-        method: 'POST',
-        body: JSON.stringify({ message })
-      });
-      toast('广播任务已提交至后台队列', 'success');
-      document.getElementById('broadcast-message').value = '';
-      if (res.job_id && pollJob) {
-        pollJob(res.job_id, document.getElementById('broadcast-progress'));
-      }
-    } catch (error) {
-      toast(error.message, 'error');
+      const res = await FSB.api("/api/broadcast", { method: "POST", body: { message: msg } });
+      FSB.toast("广播任务已启动: " + res.job_id, "success");
+    } catch (err) {
+      FSB.toast(err.message, "error");
     }
   }
 
-  // 5. 封禁名单 Banned（100% 对齐 GET /api/banned、POST /api/ban、POST /api/unban）
-  async function banned(container, page = 1) {
-    const data = await api(`/api/banned?page=${page}`);
-    const list = data.banned_users || data.items || data.users || [];
-    container.innerHTML = `
-      <div class="page-actions" style="margin-bottom:14px">
-        <button type="button" class="btn btn-accent" onclick="Tenant.banModal()">新增封禁用户</button>
-      </div>
-      <div class="card table-card">
-        <div class="card-header">
-          <h3>已封禁用户列表</h3>
-          <span class="text-muted">共 ${esc(String(data.total ?? list.length))} 人</span>
-        </div>
-        <div class="card-body" style="padding:0">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>User ID</th>
-                <th>封禁原因</th>
-                <th>封禁时间</th>
-                <th style="text-align:right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${list.map((u) => `
-                <tr>
-                  <td><code class="code-text">${esc(String(u.user_id))}</code></td>
-                  <td>${esc(u.reason || '无')}</td>
-                  <td class="text-muted">${u.banned_at ? new Date(Number(u.banned_at) * 1000).toLocaleString() : '-'}</td>
-                  <td style="text-align:right">
-                    <button type="button" class="btn btn-ghost btn-sm" onclick="Tenant.unban('${esc(String(u.user_id))}')">解封</button>
-                  </td>
-                </tr>
-              `).join('') || '<tr><td colspan="4" class="empty-state">暂无封禁用户</td></tr>'}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    `;
-  }
-
-  function banModal(userId = '') {
-    openModal(
-      '新增封禁用户',
-      `
-        <div class="form-group">
-          <label class="form-label">Telegram User ID</label>
-          <input class="form-input" id="ban-userid" value="${esc(String(userId))}" placeholder="例如: 123456789">
-        </div>
-        <div class="form-group">
-          <label class="form-label">封禁原因</label>
-          <input class="form-input" id="ban-reason" placeholder="违规访问或恶意刷请求">
-        </div>
-      `,
-      `<button type="button" class="btn btn-ghost" onclick="FSB.closeModal()">取消</button>
-       <button type="button" class="btn btn-danger" onclick="Tenant.ban()">确认封禁</button>`
-    );
-  }
-
-  async function ban() {
-    const userId = document.getElementById('ban-userid')?.value?.trim();
-    const reason = document.getElementById('ban-reason')?.value?.trim();
-    if (!userId) return toast('请输入 User ID', 'error');
-    try {
-      await api('/api/ban', {
-        method: 'POST',
-        body: JSON.stringify({ user_id: Number(userId), reason })
-      });
-      toast('用户已封禁', 'success');
-      closeModal();
-      if (navigate) navigate('banned');
-      else banned(document.getElementById('page-content'));
-    } catch (error) {
-      toast(error.message, 'error');
-    }
-  }
-
-  async function unban(userId) {
-    try {
-      await api('/api/unban', {
-        method: 'POST',
-        body: JSON.stringify({ user_id: Number(userId) })
-      });
-      toast('用户已解封', 'success');
-      if (navigate) navigate('banned');
-      else banned(document.getElementById('page-content'));
-    } catch (error) {
-      toast(error.message, 'error');
-    }
-  }
-
-  // 6. 参数设置 Settings（支持「发送一条消息解锁」可选项 & 「多种付费方式各自独立可选」联动）
-  function syncAccessGateState() {
-    const fsubInput = document.getElementById('setting-force_sub_channels');
-    const hasChannels = Boolean(fsubInput && fsubInput.value.trim().length > 0);
-    const requireMsgChecked = Boolean(document.getElementById('setting-force_sub_require_msg')?.checked);
-    const payUnlockChecked = Boolean(document.getElementById('setting-pay_to_unlock')?.checked);
-
-    const fsubBadge = document.getElementById('gate-mode-fsub-badge');
-    const payBadge = document.getElementById('gate-mode-pay-badge');
-
-    if (fsubBadge) {
-      fsubBadge.className = hasChannels ? 'badge badge-success' : 'badge badge-neutral';
-      fsubBadge.textContent = hasChannels
-        ? (requireMsgChecked ? '当前生效：强制订阅 + 需发一条消息解锁' : '当前生效：仅强制订阅即可解锁')
-        : '未绑定强制订阅频道';
-    }
-    if (payBadge) {
-      payBadge.className = (!hasChannels && payUnlockChecked) ? 'badge badge-info' : 'badge badge-neutral';
-      payBadge.textContent = !hasChannels
-        ? (payUnlockChecked ? '当前生效：已启用多方式付费解锁' : '可选：未启用付费解锁')
-        : '已绑定强制订阅频道（付费门禁自动挂起）';
-    }
-
-    // 动态展开/隐藏「发送一条消息解锁」的提示语配置框
-    const msgPromptBox = document.getElementById('fsub-msg-prompt-wrapper');
-    if (msgPromptBox) {
-      msgPromptBox.classList.toggle('hidden', !requireMsgChecked);
-    }
-
-    // 动态展开/隐藏「付费解锁」子选项面板及 4 种可选付费方式各自的参数面板
-    const payMethodsPanel = document.getElementById('pay-methods-panel');
-    if (payMethodsPanel) {
-      payMethodsPanel.classList.toggle('hidden', !payUnlockChecked);
-    }
-
-    const toggleSubBox = (checkboxId, boxId) => {
-      const checked = Boolean(document.getElementById(checkboxId)?.checked);
-      const box = document.getElementById(boxId);
-      if (box) box.classList.toggle('hidden', !checked);
-    };
-
-    toggleSubBox('setting-pay_enable_stars', 'pay-box-stars');
-    toggleSubBox('setting-pay_enable_usdt', 'pay-box-usdt');
-    toggleSubBox('setting-pay_enable_cashier', 'pay-box-cashier');
-    toggleSubBox('setting-pay_enable_cdkey', 'pay-box-cdkey');
-  }
-
-  async function settings(container) {
-    const data = await api('/api/settings');
-    const fsubChannelsStr = (data.force_sub_channels || []).join(',');
-    const boundChannelsStr = (data.bound_channels || []).join(',');
-
-    const renderToggle = (key, onChangeSync = false) => {
-      const found = boolFields.find((f) => f[0] === key);
-      if (!found) return '';
-      const [, label, desc] = found;
-      const changeAttr = onChangeSync ? 'onchange="Tenant.syncAccessGateState()"' : '';
-      return `
-        <label class="setting-item">
-          <div class="setting-item-text">
-            <span class="setting-item-title">${esc(label)}</span>
-            ${desc ? `<span class="setting-item-desc">${esc(desc)}</span>` : ''}
-          </div>
-          <input type="checkbox" id="setting-${key}" ${data[key] ? 'checked' : ''} ${changeAttr}>
-        </label>
-      `;
-    };
-
-    const renderNumber = (key) => {
-      const found = numberFields.find((f) => f[0] === key);
-      if (!found) return '';
-      return `
-        <div class="form-group">
-          <label class="form-label">${esc(found[1])}</label>
-          <input type="number" id="setting-${key}" class="form-input" value="${data[key] ?? 0}">
-        </div>
-      `;
-    };
-
-    const renderPaymentText = (key) => {
-      const found = paymentTextFields.find((f) => f[0] === key);
-      if (!found) return '';
-      return `
-        <div class="form-group">
-          <label class="form-label">${esc(found[1])}</label>
-          <input class="form-input" id="setting-${key}" value="${esc(data[key] || '')}">
-        </div>
-      `;
-    };
-
-    container.innerHTML = `
-      <div class="settings-grid">
-        <!-- 模块 1：强制订阅频道与可选「发送一条任意消息解锁」 -->
-        <div class="card">
-          <div class="card-header">
-            <h3>门禁一：强制订阅频道与发言解锁</h3>
-            <span id="gate-mode-fsub-badge" class="badge badge-neutral">检测中</span>
-          </div>
-          <div class="card-body">
-            <div class="form-group">
-              <label class="form-label">强制订阅频道 / 群组 ID（多个以英文逗号分隔，如 -100123456789；留空代表不绑定）</label>
-              <input class="form-input code-text" id="setting-force_sub_channels"
-                     value="${esc(fsubChannelsStr)}"
-                     placeholder="留空则不绑定强制订阅频道"
-                     oninput="Tenant.syncAccessGateState()">
-            </div>
-
-            ${renderToggle('force_sub_require_msg', true)}
-
-            <div id="fsub-msg-prompt-wrapper" class="${data.force_sub_require_msg ? '' : 'hidden'}" style="padding:10px 12px;border:1px solid var(--border-color);border-radius:var(--radius-md);margin-bottom:12px">
-              <div class="form-group" style="margin-bottom:0">
-                <label class="form-label">强制订阅附加「频道发言解锁」提示语</label>
-                <textarea id="setting-force_sub_msg_prompt" class="form-input" rows="2">${esc(data.force_sub_msg_prompt || '')}</textarea>
-              </div>
-            </div>
-
-            <div class="form-group" style="margin-top:12px">
-              <label class="form-label">绑定下发频道 ID（多个以英文逗号分隔）</label>
-              <input class="form-input code-text" id="setting-bound_channels" value="${esc(boundChannelsStr)}">
-            </div>
-          </div>
-        </div>
-
-        <!-- 模块 2：不绑定强制订阅频道时的可选「付费解锁」与 4 种可选付费方式 -->
-        <div class="card">
-          <div class="card-header">
-            <h3>门禁二：不绑定强制订阅时的付费解锁（可选项）</h3>
-            <span id="gate-mode-pay-badge" class="badge badge-neutral">检测中</span>
-          </div>
-          <div class="card-body">
-            ${renderToggle('pay_to_unlock', true)}
-
-            <div id="pay-methods-panel" class="${data.pay_to_unlock ? '' : 'hidden'}">
-              ${renderNumber('pay_unlock_expire')}
-
-              <!-- 可选方式 1：Telegram Stars -->
-              ${renderToggle('pay_enable_stars', true)}
-              <div id="pay-box-stars" class="${data.pay_enable_stars ? '' : 'hidden'}" style="padding:10px 12px;border:1px solid var(--border-color);border-radius:var(--radius-md);margin-bottom:10px">
-                ${renderNumber('pay_amount_stars')}
-              </div>
-
-              <!-- 可选方式 2：USDT 转账 -->
-              ${renderToggle('pay_enable_usdt', true)}
-              <div id="pay-box-usdt" class="${data.pay_enable_usdt ? '' : 'hidden'}" style="padding:10px 12px;border:1px solid var(--border-color);border-radius:var(--radius-md);margin-bottom:10px">
-                <div class="form-row-2">
-                  ${renderPaymentText('pay_amount_usdt')}
-                  ${renderPaymentText('pay_usdt_network')}
-                </div>
-                ${renderPaymentText('pay_usdt_address')}
-              </div>
-
-              <!-- 可选方式 3：第三方在线收银台 -->
-              ${renderToggle('pay_enable_cashier', true)}
-              <div id="pay-box-cashier" class="${data.pay_enable_cashier ? '' : 'hidden'}" style="padding:10px 12px;border:1px solid var(--border-color);border-radius:var(--radius-md);margin-bottom:10px">
-                ${renderPaymentText('pay_custom_url')}
-              </div>
-
-              <!-- 可选方式 4：卡密 / 激活码 (CDKey) -->
-              ${renderToggle('pay_enable_cdkey', true)}
-              <div id="pay-box-cdkey" class="${data.pay_enable_cdkey !== false ? '' : 'hidden'}" style="padding:10px 12px;border:1px solid var(--border-color);border-radius:var(--radius-md);margin-bottom:10px">
-                <div class="cdkey-toolbar" style="border-top:none;padding-top:0">
-                  <div class="cdkey-toolbar-left">
-                    <input type="number" id="cdkey-gen-count" class="form-input" style="width:100px" value="10" min="1" max="200">
-                    <button type="button" class="btn btn-ghost" onclick="Tenant.generateCdkeys()">批量生成激活码</button>
-                    <button type="button" class="btn btn-ghost" onclick="Tenant.loadCdkeys()">查看可用卡密</button>
-                  </div>
-                </div>
-                <div id="cdkey-output-box" class="hidden" style="margin-top:10px"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 模块 3：短链验证、防转发与限流参数 -->
-        <div class="card">
-          <div class="card-header">
-            <h3>安全验证、防转发与访问限流</h3>
-          </div>
-          <div class="card-body">
-            ${renderToggle('is_verify')}
-            ${renderToggle('protect_content')}
-            ${renderToggle('show_promo')}
-            ${renderToggle('disable_channel_button')}
-            <div class="form-row-2" style="margin-top:12px">
-              ${renderNumber('verify_expire')}
-              ${renderNumber('auto_delete_time')}
-              ${renderNumber('share_code_length')}
-              ${renderNumber('rate_limit_max')}
-              ${renderNumber('rate_limit_window')}
-            </div>
-          </div>
-        </div>
-
-        <!-- 模块 4：消息文案与模板设置 -->
-        <div class="card">
-          <div class="card-header">
-            <h3>消息文案与模板设置</h3>
-          </div>
-          <div class="card-body">
-            ${textFields.filter(([k]) => k !== 'force_sub_msg_prompt').map(([key, label, rows]) => `
-              <div class="form-group">
-                <label class="form-label">${esc(label)}</label>
-                <textarea id="setting-${key}" class="form-input" rows="${rows || 2}">${esc(data[key] || '')}</textarea>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      </div>
-
-      <div class="page-actions" style="margin-top:20px">
-        <button type="button" class="btn btn-accent" onclick="Tenant.saveSettings()">保存配置</button>
-      </div>
-    `;
-
-    syncAccessGateState();
-  }
-
-  async function saveSettings() {
-    const payload = {};
-    boolFields.forEach(([key]) => {
-      const el = document.getElementById('setting-' + key);
-      if (el) payload[key] = el.checked;
-    });
-    numberFields.forEach(([key]) => {
-      const el = document.getElementById('setting-' + key);
-      if (el) payload[key] = Number(el.value);
-    });
-    paymentTextFields.forEach(([key]) => {
-      const el = document.getElementById('setting-' + key);
-      if (el) payload[key] = el.value.trim();
-    });
-    textFields.forEach(([key]) => {
-      const el = document.getElementById('setting-' + key);
-      if (el) payload[key] = el.value;
-    });
-    payload.force_sub_channels = channelValue('force_sub_channels');
-    payload.bound_channels = channelValue('bound_channels');
-
-    try {
-      await api('/api/settings', {
-        method: 'PUT',
-        body: JSON.stringify(payload)
-      });
-      toast('设置已保存，Worker 将自动同步生效', 'success');
-    } catch (error) {
-      toast(error.message, 'error');
-    }
-  }
-
-  async function generateCdkeys() {
-    const count = Number(document.getElementById('cdkey-gen-count')?.value || 10);
-    const box = document.getElementById('cdkey-output-box');
-    try {
-      const res = await api('/api/cdkeys', {
-        method: 'POST',
-        body: JSON.stringify({ count })
-      });
-      const codes = res.codes || [];
-      if (box) {
-        box.classList.remove('hidden');
-        box.innerHTML = `
-          <label class="form-label">新生成激活码（共 ${codes.length} 个，可直接复制）</label>
-          <textarea class="form-input code-text" rows="5" readonly>${esc(codes.join('\n'))}</textarea>
-        `;
-      }
-      toast(`已生成 ${codes.length} 个激活码`, 'success');
-    } catch (error) {
-      toast(error.message, 'error');
-    }
-  }
-
-  async function loadCdkeys() {
-    const box = document.getElementById('cdkey-output-box');
-    try {
-      const res = await api('/api/cdkeys');
-      const items = res.items || [];
-      if (box) {
-        box.classList.remove('hidden');
-        const unused = items.filter((i) => !i.used_by).map((i) => i.code);
-        box.innerHTML = `
-          <label class="form-label">当前未核销激活码（可用 ${unused.length} 个 / 总计 ${items.length} 个）</label>
-          <textarea class="form-input code-text" rows="5" readonly>${esc(unused.join('\n') || '暂无未使用的激活码')}</textarea>
-        `;
-      }
-    } catch (error) {
-      toast(error.message, 'error');
-    }
-  }
-
-  // 7. 健康诊断 Health（100% 对齐 GET /api/system/health）
-  async function health(container) {
-    const data = await api('/api/system/health');
-    container.innerHTML = `
-      <div class="stats-grid">
-        <div class="stat-card">
-          <div class="stat-label">MongoDB 状态</div>
-          <div class="stat-value">${esc(String(data.database || '-'))}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">租户 Bot 状态</div>
-          <div class="stat-value">${esc(String(data.bot || '-'))}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">控制面板内存占用</div>
-          <div class="stat-value code-text">${esc(String(data.web_memory_mb ?? 0))} MB</div>
-        </div>
-      </div>
-      ${data.last_error ? `<div class="alert alert-danger">${esc(data.last_error)}</div>` : ''}
-    `;
-  }
-
-  window.Tenant = {
-    dashboard,
-    users,
-    usersPage,
-    toggleUserUnlock,
-    shares,
-    sharesPage,
-    searchShares,
-    editShare,
-    saveShare,
-    forwardShare,
-    runForward,
-    removeShare,
-    confirmRemoveShare,
-    broadcast,
-    sendBroadcast,
-    banned,
-    banModal,
-    ban,
-    unban,
-    settings,
-    saveSettings,
-    syncAccessGateState,
-    generateCdkeys,
-    loadCdkeys,
-    health
-  };
-})();re',
-    'eye': 'j-eye',
-    'download': 'j-download',
-    'database': 'j-building',
-    'robot': 'j-bolt',
-    'memory': 'j-gear'
-  };
-
-  function card(icon, value, label) {
-    const svgId = JELLY_MAP[icon] || 'j-bolt';
-    return `<div class="stat-card">
-      <svg class="jelly-svg md"><use href="#${svgId}"/></svg>
-      <div class="stat-content">
-        <div class="stat-value">${esc(value)}</div>
-        <div class="stat-label">${esc(label)}</div>
-      </div>
-    </div>`;
-  }
-
-  async function dashboard(container) {
-    const data = await api('/api/dashboard');
-    document.getElementById('sidebar-context').textContent = data.tenant.display_name;
-    container.innerHTML = `<div class="stats-grid">
-      ${card('users', data.users.total, '总用户')}
-      ${card('share-nodes', data.shares.total, '受控分享')}
-      ${card('eye', data.shares.views, '总浏览')}
-      ${card('download', data.shares.downloads, '总下载')}
-    </div>
-    <div class="card">
-      <div class="card-header"><h3>运行状态监控</h3></div>
-      <div class="card-body">
-        <div class="health-grid">
-          <div class="health-item"><div class="health-label">Bot 进程</div><div class="health-value">${data.system.bot ? '🟢 正常运行' : '🔴 异常'}</div></div>
-          <div class="health-item"><div class="health-label">Bot 用户名</div><div class="health-value">${esc(data.system.bot_username || '-')}</div></div>
-          <div class="health-item"><div class="health-label">存储频道</div><div class="health-value">${esc(data.system.db_channel_status || '-')}</div></div>
-        </div>
-        ${data.system.last_error ? `<div class="alert alert-danger">${esc(data.system.last_error)}</div>` : ''}
-      </div>
-    </div>`;
-  }
-
-  async function users(container, page = 1) {
-    const data = await api(`/api/users?page=${page}`);
-    const list = data.items || data.users || [];
-    container.innerHTML = `<div class="table-card"><table><thead><tr><th>#</th><th>Telegram User ID</th><th>操作</th></tr></thead><tbody>${list.map((u, i) => `<tr><td>${(page - 1) * 10 + i + 1}</td><td><code>${esc(u.user_id)}</code></td><td><button type="button" class="btn btn-danger btn-sm" onclick="Tenant.banModal('${esc(u.user_id)}')">封禁</button></td></tr>`).join('') || '<tr><td colspan="3" class="empty-state">暂无用户</td></tr>'}</tbody></table></div>${pagination(data.page, data.total_pages, 'Tenant.usersPage')}`;
-  }
-  function usersPage(page) { window.App.loadPage('users', page); }
-
-  async function shares(container, page = 1, search = '') {
-    const data = await api(`/api/shares?page=${page}&search=${encodeURIComponent(search)}`);
-    const list = data.items || data.shares || [];
-    container.innerHTML = `<div class="page-actions"><div class="search-box"><input class="form-input" id="share-search" placeholder="搜索文件名或 Key" value="${esc(search)}"><button type="button" class="btn btn-ghost" onclick="Tenant.searchShares()"><i class="fas fa-search"></i></button></div></div>
-      <div class="table-card"><table><thead><tr><th>文件名</th><th>Key</th><th>访问密码</th><th>类型</th><th>下载数</th><th>浏览数</th><th>操作</th></tr></thead><tbody>${list.map(s => {
-        const sid = s.id || s.code || s.key;
-        return `<tr>
-          <td><strong>${esc(s.file_name || s.title || '-')}</strong></td>
-          <td><span class="code-text">${esc(s.key || s.code)}</span></td>
-          <td>${esc(s.password || '-')}</td>
-          <td>${esc(s.media_type || s.file_type || '-')}</td>
-          <td>${esc(s.download_count ?? s.downloads ?? 0)}</td>
-          <td>${esc(s.view_count ?? s.views ?? 0)}</td>
-          <td><div class="table-actions">
-            <button type="button" class="btn btn-ghost btn-sm" onclick="Tenant.editShare('${esc(sid)}')">编辑</button>
-            <button type="button" class="btn btn-ghost btn-sm" onclick="Tenant.forwardShare('${esc(sid)}')">补发文件</button>
-            <button type="button" class="btn btn-danger btn-sm" onclick="Tenant.removeShare('${esc(sid)}')">删除</button>
-          </div></td>
-        </tr>`;
-      }).join('') || '<tr><td colspan="7" class="empty-state">暂无分享</td></tr>'}</tbody></table></div>${pagination(data.page, data.total_pages, 'Tenant.sharesPage')}`;
-  }
-  function sharesPage(page) { window.App.loadPage('shares', page, document.getElementById('share-search')?.value || ''); }
-  function searchShares() { window.App.loadPage('shares', 1, document.getElementById('share-search')?.value || ''); }
-
-  async function editShare(id) {
-    try {
-      const share = await api('/api/shares/' + encodeURIComponent(id));
-      modal('编辑分享', `<div class="form-group"><label class="form-label">Key</label><input class="form-input" value="${esc(share.key || share.code || id)}" disabled></div>
-        <div class="form-group"><label class="form-label">文件名</label><input class="form-input" id="share-filename" value="${esc(share.file_name || share.title || '')}"></div>
-        <div class="form-group"><label class="form-label">访问密码</label><input class="form-input" id="share-password" value="${esc(share.password || '')}"></div>`, `<button type="button" class="btn btn-ghost" onclick="FSB.closeModal()">取消</button><button type="button" class="btn btn-accent" onclick="Tenant.saveShare('${esc(id)}')">保存</button>`);
-    } catch (error) { toast(error.message, 'error'); }
-  }
-
-  async function saveShare(id) {
-    try {
-      await api('/api/shares/' + encodeURIComponent(id), {
-        method: 'PUT',
-        body: JSON.stringify({
-          file_name: document.getElementById('share-filename').value.trim(),
-          password: document.getElementById('share-password').value.trim()
-        })
-      });
-      closeModal(); toast('分享已更新', 'success'); window.App.navigate('shares');
-    } catch (error) { toast(error.message, 'error'); }
-  }
-
-  async function forwardShare(id) {
-    modal('补发文件', `<div class="form-group"><label class="form-label">接收者 Telegram User ID</label><input class="form-input" type="number" id="forward-target"></div>`, `<button type="button" class="btn btn-ghost" onclick="FSB.closeModal()">取消</button><button type="button" class="btn btn-accent" onclick="Tenant.runForward('${esc(id)}')">立即发送</button>`);
-  }
-
-  async function runForward(id) {
-    const target = Number(document.getElementById('forward-target').value);
-    if (!target) return toast('请输入目标 User ID', 'error');
-    try {
-      await api(`/api/shares/${encodeURIComponent(id)}/forward`, { method: 'POST', body: JSON.stringify({ target_user_id: target }) });
-      closeModal(); toast('补发任务已提交', 'success');
-    } catch (error) { toast(error.message, 'error'); }
-  }
-
-  function removeShare(id) {
-    modal(
-      '确认删除分享',
-      `<p>确定删除分享 <span class="code-text">${esc(id)}</span> 吗？删除后用户无法继续通过该 Key 提取文件。</p>`,
-      `<button type="button" class="btn btn-ghost" onclick="FSB.closeModal()">取消</button><button type="button" class="btn btn-danger" onclick="Tenant.confirmRemoveShare('${esc(id)}')">确认删除</button>`
-    );
-  }
-
-  async function confirmRemoveShare(id) {
-    try {
-      await api('/api/shares/' + encodeURIComponent(id), { method: 'DELETE' });
-      closeModal(); toast('分享已删除', 'success'); window.App.navigate('shares');
-    } catch (error) { toast(error.message, 'error'); }
-  }
-
-  async function broadcast(container) {
-    container.innerHTML = `<div class="card"><div class="card-header"><h3>新增全员广播</h3></div><div class="card-body">
-      <div class="form-group"><label class="form-label">消息内容（支持 HTML 标签排版）</label><textarea class="form-textarea" id="broadcast-message" rows="6" placeholder="<b>📢 频道更新通知</b>"></textarea></div>
-      <button type="button" class="btn btn-accent" id="broadcast-send" onclick="Tenant.sendBroadcast()">🚀 发送广播</button>
-      <div id="broadcast-progress" class="code-text margin-top-md">准备就绪</div>
-    </div></div>`;
-  }
-
-  async function sendBroadcast() {
-    const message = document.getElementById('broadcast-message').value.trim();
-    if (!message) return toast('请输入消息内容', 'error');
-    try {
-      const result = await api('/api/broadcast', { method: 'POST', headers: { 'Idempotency-Key': String(Date.now()) }, body: JSON.stringify({ message }) });
-      document.getElementById('broadcast-send').disabled = true;
-      const job = await pollJob(result.job_id, jobState => {
-        const p = jobState.progress || {};
-        document.getElementById('broadcast-progress').textContent = `${jobState.state} ${p.current || 0}/${p.total || 0}, 成功 ${p.successful || 0}, 失败 ${p.failed || 0}`;
-      });
-      toast(job.state === 'completed' ? '广播发送完成' : `广播失败: ${job.last_error}`, job.state === 'completed' ? 'success' : 'error');
-    } catch (error) { toast(error.message, 'error'); }
-    finally {
-      const btn = document.getElementById('broadcast-send');
-      if (btn) btn.disabled = false;
-    }
-  }
-
-  async function banned(container) {
-    const data = await api('/api/banned');
-    const list = data.banned_users || data.items || [];
-    container.innerHTML = `<div class="page-actions"><button type="button" class="btn btn-accent" onclick="Tenant.banModal()"><i class="fas fa-user-slash"></i> 封禁用户</button></div><div class="table-card"><table><thead><tr><th>User ID</th><th>封禁原因</th><th>操作</th></tr></thead><tbody>${list.map(u => `<tr><td><code>${esc(u.user_id)}</code></td><td>${esc(u.reason)}</td><td><button type="button" class="btn btn-success btn-sm" onclick="Tenant.unban(${Number(u.user_id)})">解封</button></td></tr>`).join('') || '<tr><td colspan="3" class="empty-state">当前无封禁用户</td></tr>'}</tbody></table></div>`;
-  }
-
-  function banModal(userId = '') {
-    modal('封禁用户', `<div class="form-group"><label class="form-label">Telegram User ID</label><input class="form-input" id="ban-id" type="number" value="${esc(userId)}"></div><div class="form-group"><label class="form-label">封禁原因</label><input class="form-input" id="ban-reason" placeholder="例如：恶意刷取资源"></div>`, '<button type="button" class="btn btn-ghost" onclick="FSB.closeModal()">取消</button><button type="button" class="btn btn-danger" onclick="Tenant.ban()">确认封禁</button>');
-  }
-
-  async function ban() {
-    try {
-      await api('/api/ban', { method: 'POST', body: JSON.stringify({ user_id: Number(document.getElementById('ban-id').value), reason: document.getElementById('ban-reason').value }) });
-      closeModal(); toast('用户已封禁', 'success'); window.App.navigate('banned');
-    } catch (error) { toast(error.message, 'error'); }
-  }
-
-  async function unban(id) {
-    try {
-      await api('/api/unban', { method: 'POST', body: JSON.stringify({ user_id: id }) });
-      toast('用户已解封', 'success'); window.App.navigate('banned');
-    } catch (error) { toast(error.message, 'error'); }
-  }
-
-  const boolFields = [['is_verify', '启用短链验证'], ['protect_content', '默认禁止转发/另存'], ['show_promo', '显示底部推广语'], ['disable_channel_button', '隐藏原始频道按钮']];
-  const numberFields = [['verify_expire', '验证有效期 (秒)'], ['auto_delete_time', '自动销毁秒数 (0=不销毁)'], ['share_code_length', '分享码长度'], ['rate_limit_max', '单用户限流次数'], ['rate_limit_window', '限流时间窗口 (秒)']];
-  const textFields = [['promo_text', '底部推广语'], ['custom_caption', '自定义文件说明模板'], ['custom_buttons', '自定义底部按钮'], ['start_message', '欢迎语 (/start)'], ['force_sub_message', '强制订阅提示语'], ['help_text', '普通用户帮助文案'], ['admin_help_text', '管理员帮助文案'], ['keyword_button_text', '关键词按钮文字']];
-
-  async function settings(container) {
-    const data = await api('/api/settings');
-    container.innerHTML = `<div class="settings-grid"><div class="card"><div class="card-header"><h3>⚙️ 行为与限流设置</h3></div><div class="card-body">
-      ${boolFields.map(([key, label]) => `<label class="setting-item"><span>${esc(label)}</span><input type="checkbox" id="setting-${key}" ${data[key] ? 'checked' : ''}></label>`).join('')}
-      ${numberFields.map(([key, label]) => `<div class="form-group"><label class="form-label">${esc(label)}</label><input class="form-input" type="number" id="setting-${key}" value="${esc(data[key] ?? 0)}"></div>`).join('')}
-      <div class="form-group"><label class="form-label">强制订阅频道 ID（逗号分隔）</label><input class="form-input" id="setting-force_sub_channels" value="${esc((data.force_sub_channels || []).join(','))}"></div>
-      <div class="form-group"><label class="form-label">绑定下发频道 ID（逗号分隔）</label><input class="form-input" id="setting-bound_channels" value="${esc((data.bound_channels || []).join(','))}"></div>
-    </div></div><div class="card"><div class="card-header"><h3>📝 消息文案与模板设置</h3></div><div class="card-body">
-      ${textFields.map(([key, label]) => `<div class="form-group"><label class="form-label">${esc(label)}</label><textarea class="form-textarea" id="setting-${key}">${esc(data[key] || '')}</textarea></div>`).join('')}
-    </div></div></div><div class="page-actions"><button type="button" class="btn btn-accent" onclick="Tenant.saveSettings()">💾 保存全部设置</button></div>`;
-  }
-
-  function channelValue(key) {
-    return document.getElementById('setting-' + key).value.split(',').map(v => v.trim()).filter(Boolean).map(Number);
-  }
-
-  async function saveSettings() {
-    const payload = {};
-    boolFields.forEach(([key]) => { payload[key] = document.getElementById('setting-' + key).checked; });
-    numberFields.forEach(([key]) => { payload[key] = Number(document.getElementById('setting-' + key).value); });
-    textFields.forEach(([key]) => { payload[key] = document.getElementById('setting-' + key).value; });
-    payload.force_sub_channels = channelValue('force_sub_channels');
-    payload.bound_channels = channelValue('bound_channels');
-    try {
-      await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
-      toast('设置已保存，Worker 将自动热更新应用', 'success');
-    } catch (error) { toast(error.message, 'error'); }
-  }
-
-  async function health(container) {
-    const data = await api('/api/system/health');
-    container.innerHTML = `<div class="stats-grid">
-      ${card('database', data.database, 'MongoDB 状态')}
-      ${card('robot', data.bot, '租户 Bot 状态')}
-      ${card('memory', data.web_memory_mb + ' MB', '控制面内存占用')}
-    </div>${data.last_error ? `<div class="alert alert-danger">${esc(data.last_error)}</div>` : ''}`;
-  }
-
-  window.Tenant = {
-    dashboard, users, usersPage, shares, sharesPage, searchShares,
-    editShare, saveShare, forwardShare, runForward, removeShare, confirmRemoveShare,
-    broadcast, sendBroadcast, banned, banModal, ban, unban, settings, saveSettings, health
-  };
+  Object.assign(window.FSB, {
+    renderDashboard: renderDashboard,
+    restartTenantBot: restartTenantBot,
+    renderSettings: renderSettings,
+    renderShares: renderShares,
+    searchShares: searchShares,
+    openCreateShareModal: openCreateShareModal,
+    submitCreateShare: submitCreateShare,
+    openEditShareModal: openEditShareModal,
+    submitEditShare: submitEditShare,
+    deleteShare: deleteShare,
+    renderUsers: renderUsers,
+    searchUsers: searchUsers,
+    openAddUserModal: openAddUserModal,
+    submitAddUser: submitAddUser,
+    toggleUserUnlock: toggleUserUnlock,
+    banUser: banUser,
+    unbanUser: unbanUser,
+    deleteUserRecord: deleteUserRecord,
+    renderCDKeys: renderCDKeys,
+    generateCDKeys: generateCDKeys,
+    deleteCDKey: deleteCDKey,
+    renderBroadcast: renderBroadcast,
+    submitBroadcast: submitBroadcast,
+  });
 })();
