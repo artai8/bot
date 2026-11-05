@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多租户文件分享机器人</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div id="login-screen" class="login-screen">
+        <div class="login-bg"><div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div></div>
+        <div class="login-card">
+            <div class="login-header">
+                <div class="login-icon"><i class="fas fa-shield-halved"></i></div>
+                <h1>管理面板</h1><p>多租户文件分享机器人</p>
+            </div>
+            <form id="login-form" onsubmit="return false;">
+                <div class="form-group role-switch">
+                    <label><input type="radio" name="login-scope" value="tenant" checked> 租户管理员</label>
+                    <label><input type="radio" name="login-scope" value="platform"> 平台管理员</label>
+                </div>
+                <div class="input-with-icon" id="tenant-slug-row">
+                    <i class="fas fa-building"></i>
+                    <input type="text" id="login-tenant" placeholder="租户标识" autocomplete="username">
+                </div>
+                <div class="input-with-icon">
+                    <i class="fas fa-lock"></i>
+                    <input type="password" id="login-password" placeholder="请输入密码" required autocomplete="current-password">
+                    <button type="button" class="eye-btn" id="toggle-password"><i class="fas fa-eye"></i></button>
+                </div>
+                <button type="submit" class="btn btn-accent btn-block" id="login-btn">
+                    <span class="btn-text">登录</span><span class="btn-loader hidden"><i class="fas fa-circle-notch fa-spin"></i></span>
+                </button>
+            </form>
+            <div id="login-error" class="login-error hidden"></div>
+            <div class="login-footer"><i class="fas fa-lock"></i> 凭证仅通过加密连接提交</div>
+        </div>
+    </div>
+
+    <div id="app" class="app hidden">
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-brand"><div class="brand-icon"><i class="fas fa-bolt"></i></div><span class="brand-text">管理面板</span></div>
+            <nav class="sidebar-nav" id="sidebar-nav"></nav>
+            <div class="sidebar-footer">
+                <div class="sidebar-user">
+                    <div class="user-avatar"><i class="fas fa-user-shield"></i></div>
+                    <div class="user-meta"><span class="user-name" id="sidebar-role">管理员</span><span class="user-sub" id="sidebar-context">管理面板</span></div>
+                </div>
+                <button class="btn-icon hidden" id="leave-impersonation" title="退出代管"><i class="fas fa-person-walking-arrow-right"></i></button>
+                <button class="btn-icon" id="logout-btn" title="退出登录"><i class="fas fa-right-from-bracket"></i></button>
+            </div>
+        </aside>
+        <div class="sidebar-overlay" id="sidebar-overlay"></div>
+        <main class="main">
+            <header class="topbar">
+                <div class="topbar-left">
+                    <button class="btn-icon mobile-toggle" id="mobile-toggle"><i class="fas fa-bars"></i></button>
+                    <div><h1 id="page-title">总览</h1><p id="page-subtitle" class="text-muted"></p></div>
+                </div>
+                <div class="topbar-right">
+                    <div class="status-pill" id="status-pill"><span class="status-dot online"></span><span>在线</span></div>
+                    <button class="btn-icon" id="refresh-btn" title="刷新"><i class="fas fa-arrows-rotate"></i></button>
+                </div>
+            </header>
+            <div class="content" id="page-content"></div>
+        </main>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+    <div id="modal-overlay" class="modal-overlay hidden">
+        <div class="modal">
+            <div class="modal-header"><h3 id="modal-title"></h3><button class="btn-icon" id="modal-close"><i class="fas fa-xmark"></i></button></div>
+            <div class="modal-body" id="modal-body"></div><div class="modal-actions" id="modal-actions"></div>
+        </div>
+    </div>
+
+    <script src="/static/js/core.js"></script>
+    <script src="/static/js/tenant.js"></script>
+    <script src="/static/js/platform.js?v=20260815"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

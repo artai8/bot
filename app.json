@@ -1,0 +1,19 @@
+{
+  "name": "multi-tenant-file-sharing-bot",
+  "description": "Multi-tenant Telegram file sharing bot control plane and workers",
+  "keywords": ["telegram", "multi-tenant", "file-sharing"],
+  "env": {
+    "API_ID": {"description": "Telegram application API ID", "value": ""},
+    "API_HASH": {"description": "Telegram application API hash", "value": ""},
+    "DATABASE_URL": {"description": "MongoDB connection URI", "value": ""},
+    "DATABASE_NAME": {"description": "MongoDB database name", "value": "filesharing"},
+    "PLATFORM_ADMIN_PASSWORD": {"description": "Long random platform administrator password", "value": ""},
+    "TENANT_MASTER_KEY": {"description": "Fernet key used to encrypt tenant Bot Tokens", "value": ""},
+    "WORKER_BOT_CAPACITY": {"description": "Maximum bots per worker", "value": "10", "required": false}
+  },
+  "buildpacks": [{"url": "heroku/python"}],
+  "formation": {
+    "web": {"quantity": 1, "size": "basic"},
+    "worker": {"quantity": 1, "size": "basic"}
+  }
+}
