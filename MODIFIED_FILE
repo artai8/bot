@@ -1,3 +1,0 @@
-Deployment package: bot2
-Copied source files and folders are listed in SOURCE_MANIFEST.sha256.
-This package intentionally excludes .git, .venv, tests, caches, logs, and local .env files.
