@@ -1,10 +1,12 @@
-"""A single tenant's Telegram bot runtime."""
+"""A single tenant's Telegram bot runtime with bounded session & cache eviction."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import tempfile
+import time
+from collections import OrderedDict
 from collections.abc import Coroutine
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +24,45 @@ from tenant import TenantContext
 pyrogram.utils.MIN_CHAT_ID = -999999999999
 pyrogram.utils.MIN_CHANNEL_ID = -100999999999999
 logger = logging.getLogger(__name__)
+
+SESSION_TTL_SECONDS = 1800  # 30 minutes TTL for interactive upload/link sessions
+MAX_ACTIVE_SESSIONS = 500
+MAX_LINKED_CACHE_SIZE = 1000
+
+
+class BoundedSessionDict(OrderedDict):
+    """Dict with automatic TTL expiration and LRU capacity limit."""
+
+    def __init__(self, max_size: int = MAX_ACTIVE_SESSIONS, ttl: float = SESSION_TTL_SECONDS):
+        super().__init__()
+        self.max_size = max_size
+        self.ttl = ttl
+        self._timestamps: dict[Any, float] = {}
+
+    def _evict_expired(self) -> None:
+        now = time.monotonic()
+        expired = [k for k, ts in self._timestamps.items() if now - ts > self.ttl]
+        for k in expired:
+            super().pop(k, None)
+            self._timestamps.pop(k, None)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self._evict_expired()
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        self._timestamps[key] = time.monotonic()
+        while len(self) > self.max_size:
+            oldest, _ = self.popitem(last=False)
+            self._timestamps.pop(oldest, None)
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        self._evict_expired()
+        return super().get(key, default)
+
+    def pop(self, key: Any, *args: Any) -> Any:
+        self._timestamps.pop(key, None)
+        return super().pop(key, *args)
 
 
 class Bot(Client):
@@ -45,10 +86,10 @@ class Bot(Client):
         )
         self.invitelink: str | None = None
         self.invitelinks: dict[int, str] = {}
-        self.share_sessions: dict[int, dict[str, Any]] = {}
-        self.link_sessions: dict[int, dict[str, Any]] = {}
-        self.channel_media_groups: dict[str, dict[str, Any]] = {}
-        self.linked_chat_cache: dict[int, int | None] = {}
+        self.share_sessions: dict[int, dict[str, Any]] = BoundedSessionDict()
+        self.link_sessions: dict[int, dict[str, Any]] = BoundedSessionDict()
+        self.channel_media_groups: dict[str, dict[str, Any]] = BoundedSessionDict(max_size=200, ttl=300)
+        self.linked_chat_cache: dict[int, int | None] = BoundedSessionDict(max_size=MAX_LINKED_CACHE_SIZE, ttl=600)
         self.linked_cache_ts: dict[int, float] = {}
         self.background_tasks: set[asyncio.Task] = set()
         self.rate_limiter = RateLimiter(
@@ -112,35 +153,27 @@ class Bot(Client):
                 if not link:
                     link = await self.export_chat_invite_link(channel_id)
                 if link:
-                    links[int(channel_id)] = link
+                    links[channel_id] = link
             except Exception as exc:
-                logger.warning(
-                    "[%s] Force-sub channel %s unavailable: %s",
-                    self.tenant.slug,
-                    channel_id,
-                    exc,
-                )
+                logger.warning("[%s] Could not export invite link for %s: %s", self.tenant.slug, channel_id, exc)
         self.invitelinks = links
         self.invitelink = next(iter(links.values()), None)
 
-    def create_background_task(self, coroutine: Coroutine[Any, Any, Any]) -> asyncio.Task:
-        task = asyncio.create_task(coroutine)
+    def create_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
+        task = asyncio.create_task(coro)
         self.background_tasks.add(task)
-        task.add_done_callback(self.background_tasks.discard)
+
+        def _on_done(t: asyncio.Task) -> None:
+            self.background_tasks.discard(t)
+            if not t.cancelled() and t.exception():
+                logger.error("[%s] Background task failed: %s", self.tenant.slug, t.exception())
+
+        task.add_done_callback(_on_done)
         return task
 
-    async def _cancel_background_tasks(self) -> None:
-        tasks = list(self.background_tasks)
-        for task in tasks:
+    async def stop(self, block: bool = True) -> None:
+        for task in list(self.background_tasks):
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self.background_tasks.clear()
-        self.channel_media_groups.clear()
-
-    async def stop(self, *args: Any) -> None:
-        try:
-            await self._cancel_background_tasks()
-            await super().stop()
-        finally:
-            logger.info("[%s] Bot stopped", self.tenant.slug)
+        if self.background_tasks:
+            await asyncio.gather(*self.background_tasks, return_exceptions=True)
+        await super().stop(block=block)

@@ -80,7 +80,7 @@ class WorkerManager:
                 if time.monotonic() - self.last_database_success >= unsafe_after:
                     logger.error("Database lease safety window exceeded; stopping all bots")
                     await self._stop_all(release=False)
-            await asyncio.sleep(CONFIG.worker_heartbeat_seconds)
+                await asyncio.sleep(CONFIG.worker_heartbeat_seconds)
 
     async def sync_once(self) -> None:
         enabled_documents = await store.list_tenants(enabled=True)
@@ -346,11 +346,12 @@ class WorkerManager:
         progress = {"current": 0, "total": total, "successful": 0, "failed": 0}
         async for user_id in store.iter_user_ids(tenant_id):
             try:
-                await telegram_retry(
-                    lambda user_id=user_id: bot.send_message(
-                        chat_id=user_id, text=job["payload"]["message"]
+                async with bot.delivery_limiter.slot():
+                    await telegram_retry(
+                        lambda user_id=user_id: bot.send_message(
+                            chat_id=user_id, text=job["payload"]["message"]
+                        )
                     )
-                )
                 progress["successful"] += 1
             except (UserIsBlocked, InputUserDeactivated):
                 progress["failed"] += 1

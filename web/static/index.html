@@ -3,66 +3,175 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>多租户文件分享机器人</title>
+    <title>多租户文件分享机器人 · Jelly Glass Control Plane</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
+    <!-- 3D Glossy Jelly SVG Icon Sprite -->
+    <svg width="0" height="0" style="position:absolute;overflow:hidden" aria-hidden="true">
+      <defs>
+        <filter id="jelly-drop" x="-20%" y="-20%" width="140%" height="150%">
+          <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#020617" flood-opacity="0.35"/>
+        </filter>
+        <linearGradient id="jg-blue" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#38bdf8"/><stop offset="55%" stop-color="#6366f1"/><stop offset="100%" stop-color="#4f46e5"/>
+        </linearGradient>
+        <linearGradient id="jg-pink" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#f472b6"/><stop offset="55%" stop-color="#ec4899"/><stop offset="100%" stop-color="#9333ea"/>
+        </linearGradient>
+        <linearGradient id="jg-green" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#34d399"/><stop offset="55%" stop-color="#10b981"/><stop offset="100%" stop-color="#0d9488"/>
+        </linearGradient>
+        <linearGradient id="jg-amber" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#fde047"/><stop offset="55%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#ea580c"/>
+        </linearGradient>
+        <linearGradient id="jg-purple" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#c084fc"/><stop offset="55%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#6d28d9"/>
+        </linearGradient>
+        <linearGradient id="jg-coral" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#fda4af"/><stop offset="55%" stop-color="#f43f5e"/><stop offset="100%" stop-color="#be123c"/>
+        </linearGradient>
+        <linearGradient id="jg-gloss" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#ffffff" stop-opacity="0.78"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+        </linearGradient>
+
+        <symbol id="j-shield" viewBox="0 0 36 36">
+          <rect x="3" y="5" width="26" height="26" rx="9" fill="url(#jg-pink)" opacity="0.35" transform="rotate(-8 16 18)"/>
+          <rect x="5" y="4" width="26" height="26" rx="9" fill="url(#jg-blue)" filter="url(#jelly-drop)"/>
+          <ellipse cx="18" cy="9" rx="10" ry="3.5" fill="url(#jg-gloss)"/>
+          <path d="M18 10l7 3v5.5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V13l7-3z" fill="#fff"/>
+          <path d="M15.5 18.5l2 2 3.5-3.8" fill="none" stroke="#4f46e5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </symbol>
+
+        <symbol id="j-bolt" viewBox="0 0 36 36">
+          <rect x="4" y="4" width="28" height="28" rx="10" fill="url(#jg-amber)" filter="url(#jelly-drop)"/>
+          <ellipse cx="18" cy="9" rx="10" ry="3.5" fill="url(#jg-gloss)"/>
+          <path d="M19.5 9L11.5 19h6l-1 8 8-10h-6l1-8z" fill="#fff"/>
+        </symbol>
+
+        <symbol id="j-users" viewBox="0 0 36 36">
+          <rect x="4" y="4" width="28" height="28" rx="10" fill="url(#jg-blue)" filter="url(#jelly-drop)"/>
+          <ellipse cx="18" cy="9" rx="10" ry="3.5" fill="url(#jg-gloss)"/>
+          <circle cx="15" cy="15" r="3.2" fill="#fff"/>
+          <circle cx="22" cy="15.5" r="2.5" fill="#fff" opacity="0.85"/>
+          <path d="M10 24.5c0-2.8 2.5-4.5 5.5-4.5s5.5 1.7 5.5 4.5M20.5 24.5c0-2 1.8-3.5 4.2-3.5" stroke="#fff" stroke-width="2.4" stroke-linecap="round" fill="none"/>
+        </symbol>
+
+        <symbol id="j-share" viewBox="0 0 36 36">
+          <rect x="4" y="4" width="28" height="28" rx="10" fill="url(#jg-pink)" filter="url(#jelly-drop)"/>
+          <ellipse cx="18" cy="9" rx="10" ry="3.5" fill="url(#jg-gloss)"/>
+          <circle cx="22.5" cy="12.5" r="2.6" fill="#fff"/>
+          <circle cx="12.5" cy="18" r="2.6" fill="#fff"/>
+          <circle cx="22.5" cy="23.5" r="2.6" fill="#fff"/>
+          <path d="M14.8 16.8l5.4-3M14.8 19.2l5.4 3" stroke="#fff" stroke-width="2.3" stroke-linecap="round"/>
+        </symbol>
+
+        <symbol id="j-eye" viewBox="0 0 36 36">
+          <rect x="4" y="4" width="28" height="28" rx="10" fill="url(#jg-purple)" filter="url(#jelly-drop)"/>
+          <ellipse cx="18" cy="9" rx="10" ry="3.5" fill="url(#jg-gloss)"/>
+          <path d="M10 18s3.2-5.5 8-5.5 8 5.5 8 5.5-3.2 5.5-8 5.5-8-5.5-8-5.5z" fill="none" stroke="#fff" stroke-width="2.4"/>
+          <circle cx="18" cy="18" r="2.5" fill="#fff"/>
+        </symbol>
+
+        <symbol id="j-download" viewBox="0 0 36 36">
+          <rect x="4" y="4" width="28" height="28" rx="10" fill="url(#jg-green)" filter="url(#jelly-drop)"/>
+          <ellipse cx="18" cy="9" rx="10" ry="3.5" fill="url(#jg-gloss)"/>
+          <path d="M18 11v10m0 0l-4-4m4 4l4-4M12 24.5h12" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </symbol>
+
+        <symbol id="j-building" viewBox="0 0 36 36">
+          <rect x="4" y="4" width="28" height="28" rx="10" fill="url(#jg-blue)" filter="url(#jelly-drop)"/>
+          <ellipse cx="18" cy="9" rx="10" ry="3.5" fill="url(#jg-gloss)"/>
+          <rect x="12" y="11" width="12" height="15" rx="2" fill="none" stroke="#fff" stroke-width="2.3"/>
+          <path d="M15.5 14.5h1.5M19 14.5h1.5M15.5 18h1.5M19 18h1.5M17 26v-3.5h2V26" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+        </symbol>
+
+        <symbol id="j-gear" viewBox="0 0 36 36">
+          <rect x="4" y="4" width="28" height="28" rx="10" fill="url(#jg-coral)" filter="url(#jelly-drop)"/>
+          <ellipse cx="18" cy="9" rx="10" ry="3.5" fill="url(#jg-gloss)"/>
+          <circle cx="18" cy="18" r="3.8" fill="none" stroke="#fff" stroke-width="2.4"/>
+          <path d="M18 10.5v2M18 23.5v2M10.5 18h2M23.5 18h2M12.7 12.7l1.4 1.4M21.9 21.9l1.4 1.4M23.3 12.7l-1.4 1.4M14.1 21.9l-1.4 1.4" stroke="#fff" stroke-width="2.3" stroke-linecap="round"/>
+        </symbol>
+      </defs>
+    </svg>
+
+    <div class="login-bg" aria-hidden="true">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+    </div>
+
     <div id="login-screen" class="login-screen">
-        <div class="login-bg"><div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div></div>
         <div class="login-card">
             <div class="login-header">
-                <div class="login-icon"><i class="fas fa-shield-halved"></i></div>
-                <h1>管理面板</h1><p>多租户文件分享机器人</p>
+                <div class="login-icon-wrap">
+                    <svg class="jelly-svg lg"><use href="#j-shield"/></svg>
+                </div>
+                <h1>多租户文件分享控制面</h1>
+                <p>Glassmorphism 磨砂玻璃 · 3D 果冻微交互管理后台</p>
             </div>
-            <form id="login-form" onsubmit="return false;">
+            <form id="login-form">
                 <div class="form-group role-switch">
-                    <label><input type="radio" name="login-scope" value="tenant" checked> 租户管理员</label>
-                    <label><input type="radio" name="login-scope" value="platform"> 平台管理员</label>
+                    <label><input type="radio" name="login-scope" value="tenant" checked> <span>租户管理员</span></label>
+                    <label><input type="radio" name="login-scope" value="platform"> <span>平台管理员</span></label>
                 </div>
                 <div class="input-with-icon" id="tenant-slug-row">
                     <i class="fas fa-building"></i>
-                    <input type="text" id="login-tenant" placeholder="租户标识" autocomplete="username">
+                    <input type="text" id="login-tenant" placeholder="租户标识 (如 demo_tenant)" autocomplete="username">
                 </div>
                 <div class="input-with-icon">
                     <i class="fas fa-lock"></i>
-                    <input type="password" id="login-password" placeholder="请输入密码" required autocomplete="current-password">
-                    <button type="button" class="eye-btn" id="toggle-password"><i class="fas fa-eye"></i></button>
+                    <input type="password" id="login-password" placeholder="请输入管理密码" required autocomplete="current-password">
+                    <button type="button" class="eye-btn" id="toggle-password" title="显示/隐藏密码"><i class="fas fa-eye"></i></button>
                 </div>
                 <button type="submit" class="btn btn-accent btn-block" id="login-btn">
-                    <span class="btn-text">登录</span><span class="btn-loader hidden"><i class="fas fa-circle-notch fa-spin"></i></span>
+                    <span class="btn-text">🚀 立即登录控制台</span>
+                    <span class="btn-loader hidden"><i class="fas fa-circle-notch fa-spin"></i></span>
                 </button>
             </form>
             <div id="login-error" class="login-error hidden"></div>
-            <div class="login-footer"><i class="fas fa-lock"></i> 凭证仅通过加密连接提交</div>
+            <div class="login-footer"><i class="fas fa-lock"></i> 凭证仅通过加密会话与 Scrypt 校验传输</div>
         </div>
     </div>
 
     <div id="app" class="app hidden">
         <aside class="sidebar" id="sidebar">
-            <div class="sidebar-brand"><div class="brand-icon"><i class="fas fa-bolt"></i></div><span class="brand-text">管理面板</span></div>
+            <div class="sidebar-brand">
+                <svg class="jelly-svg md"><use href="#j-bolt"/></svg>
+                <span class="brand-text">文件分享平台</span>
+            </div>
             <nav class="sidebar-nav" id="sidebar-nav"></nav>
             <div class="sidebar-footer">
                 <div class="sidebar-user">
-                    <div class="user-avatar"><i class="fas fa-user-shield"></i></div>
-                    <div class="user-meta"><span class="user-name" id="sidebar-role">管理员</span><span class="user-sub" id="sidebar-context">管理面板</span></div>
+                    <svg class="jelly-svg sm"><use href="#j-shield"/></svg>
+                    <div class="user-meta">
+                        <span class="user-name" id="sidebar-role">管理员</span>
+                        <span class="user-sub" id="sidebar-context">管理面板</span>
+                    </div>
                 </div>
-                <button class="btn-icon hidden" id="leave-impersonation" title="退出代管"><i class="fas fa-person-walking-arrow-right"></i></button>
-                <button class="btn-icon" id="logout-btn" title="退出登录"><i class="fas fa-right-from-bracket"></i></button>
+                <div class="sidebar-footer-actions">
+                    <button type="button" class="btn-icon hidden" id="leave-impersonation" title="退出代管"><i class="fas fa-person-walking-arrow-right"></i></button>
+                    <button type="button" class="btn-icon" id="logout-btn" title="退出登录"><i class="fas fa-right-from-bracket"></i></button>
+                </div>
             </div>
         </aside>
         <div class="sidebar-overlay" id="sidebar-overlay"></div>
         <main class="main">
             <header class="topbar">
                 <div class="topbar-left">
-                    <button class="btn-icon mobile-toggle" id="mobile-toggle"><i class="fas fa-bars"></i></button>
-                    <div><h1 id="page-title">总览</h1><p id="page-subtitle" class="text-muted"></p></div>
+                    <button type="button" class="btn-icon mobile-toggle" id="mobile-toggle"><i class="fas fa-bars"></i></button>
+                    <div>
+                        <h1 id="page-title">总览</h1>
+                        <p id="page-subtitle" class="text-muted"></p>
+                    </div>
                 </div>
                 <div class="topbar-right">
-                    <div class="status-pill" id="status-pill"><span class="status-dot online"></span><span>在线</span></div>
-                    <button class="btn-icon" id="refresh-btn" title="刷新"><i class="fas fa-arrows-rotate"></i></button>
+                    <div class="status-pill" id="status-pill"><span class="status-dot online"></span><span>在线运行</span></div>
+                    <button type="button" class="btn-icon" id="theme-btn" title="切换亮色/暗色玻璃主题"><i class="fas fa-circle-half-stroke"></i></button>
+                    <button type="button" class="btn-icon" id="refresh-btn" title="刷新数据"><i class="fas fa-arrows-rotate"></i></button>
                 </div>
             </header>
             <div class="content" id="page-content"></div>
@@ -72,14 +181,18 @@
     <div id="toast-container" class="toast-container"></div>
     <div id="modal-overlay" class="modal-overlay hidden">
         <div class="modal">
-            <div class="modal-header"><h3 id="modal-title"></h3><button class="btn-icon" id="modal-close"><i class="fas fa-xmark"></i></button></div>
-            <div class="modal-body" id="modal-body"></div><div class="modal-actions" id="modal-actions"></div>
+            <div class="modal-header">
+                <h3 id="modal-title"></h3>
+                <button type="button" class="btn-icon" id="modal-close"><i class="fas fa-xmark"></i></button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+            <div class="modal-actions" id="modal-actions"></div>
         </div>
     </div>
 
     <script src="/static/js/core.js"></script>
     <script src="/static/js/tenant.js"></script>
-    <script src="/static/js/platform.js?v=20260815"></script>
+    <script src="/static/js/platform.js?v=20261105"></script>
     <script src="/static/js/app.js"></script>
 </body>
 </html>
