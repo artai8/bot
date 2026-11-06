@@ -798,7 +798,13 @@
     }
   }
 
-  Object.assign(window.FSB, {
+  const _tenantExports = {
+    dashboard: renderDashboard,
+    settings: renderSettings,
+    shares: renderShares,
+    users: renderUsers,
+    cdkeys: renderCDKeys,
+    broadcast: renderBroadcast,
     renderDashboard: renderDashboard,
     restartTenantBot: restartTenantBot,
     renderSettings: renderSettings,
@@ -822,5 +828,7 @@
     deleteCDKey: deleteCDKey,
     renderBroadcast: renderBroadcast,
     submitBroadcast: submitBroadcast,
-  });
+  };
+  Object.assign(window.FSB, _tenantExports);
+  window.Tenant = Object.assign(window.Tenant || {}, _tenantExports);
 })();

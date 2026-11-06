@@ -11,8 +11,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError
+from pymongo import ASCENDING, DESCENDING, ReturnDocument
+from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from config import CONFIG, parse_bool, tenant_defaults
 from security import (
@@ -42,6 +42,22 @@ def timestamp() -> float:
 def _create_client() -> AsyncIOMotorClient:
     uri = CONFIG.database_url or "mongodb://localhost:27017"
     return AsyncIOMotorClient(uri)
+
+
+async def _safe_create_index(coll: Any, keys: list[tuple[str, int]], **kwargs: Any) -> None:
+    try:
+        await coll.create_index(keys, **kwargs)
+    except OperationFailure as exc:
+        if exc.code in (85, 86) or "IndexOptionsConflict" in str(exc) or "IndexKeySpecsConflict" in str(exc):
+            index_name = kwargs.get("name") or "_".join(f"{k}_{v}" for k, v in keys)
+            logger.warning("Dropping conflicting MongoDB index %s on %s and recreating", index_name, coll.name)
+            try:
+                await coll.drop_index(index_name)
+                await coll.create_index(keys, **kwargs)
+            except Exception:
+                logger.exception("Failed to recreate index %s on %s", index_name, coll.name)
+        else:
+            raise
 
 
 class MongoStore:
@@ -91,27 +107,28 @@ class MongoStore:
 
     async def create_indexes(self) -> None:
         await self.ensure_schema()
-        await self.tenants.create_index([("slug", 1)], unique=True)
-        await self.users.create_index([("tenant_id", 1), ("user_id", 1)], unique=True)
-        await self.users.create_index([("tenant_id", 1), ("joined_at", -1)])
-        await self.shares.create_index([("tenant_id", 1), ("code", 1)], unique=True)
-        await self.shares.create_index([("tenant_id", 1), ("owner_id", 1), ("created_at", -1)])
-        await self.shares.create_index([("tenant_id", 1), ("message_ids", 1)])
-        await self.shares.create_index([("tenant_id", 1), ("keywords", 1)])
-        await self.banned_users.create_index([("tenant_id", 1), ("user_id", 1)], unique=True)
-        await self.stats.create_index([("tenant_id", 1), ("key", 1)], unique=True)
-        await self.sessions.create_index([("expires_at", 1)], expireAfterSeconds=0)
-        await self.leases.create_index([("tenant_id", 1)], unique=True)
-        await self.leases.create_index([("expires_at", 1)], expireAfterSeconds=0)
-        await self.jobs.create_index([("state", 1), ("available_at", 1), ("tenant_id", 1)])
-        await self.jobs.create_index([("purge_at", 1)], expireAfterSeconds=0)
-        await self.jobs.create_index(
-            [("tenant_id", 1), ("idempotency_key", 1)],
+        await _safe_create_index(self.tenants, [("slug", ASCENDING)], unique=True)
+        await _safe_create_index(self.users, [("tenant_id", ASCENDING), ("user_id", ASCENDING)], unique=True)
+        await _safe_create_index(self.users, [("tenant_id", ASCENDING), ("joined_at", DESCENDING)])
+        await _safe_create_index(self.shares, [("tenant_id", ASCENDING), ("code", ASCENDING)], unique=True)
+        await _safe_create_index(self.shares, [("tenant_id", ASCENDING), ("owner_id", ASCENDING), ("created_at", DESCENDING)])
+        await _safe_create_index(self.shares, [("tenant_id", ASCENDING), ("message_ids", ASCENDING)])
+        await _safe_create_index(self.shares, [("tenant_id", ASCENDING), ("keywords", ASCENDING)])
+        await _safe_create_index(self.banned_users, [("tenant_id", ASCENDING), ("user_id", ASCENDING)], unique=True)
+        await _safe_create_index(self.stats, [("tenant_id", ASCENDING), ("key", ASCENDING)], unique=True)
+        await _safe_create_index(self.sessions, [("expires_at", ASCENDING)], expireAfterSeconds=0)
+        await _safe_create_index(self.leases, [("tenant_id", ASCENDING)], unique=True)
+        await _safe_create_index(self.leases, [("expires_at", ASCENDING)], expireAfterSeconds=0)
+        await _safe_create_index(self.jobs, [("state", ASCENDING), ("available_at", ASCENDING), ("tenant_id", ASCENDING)])
+        await _safe_create_index(self.jobs, [("purge_at", ASCENDING)], expireAfterSeconds=0)
+        await _safe_create_index(
+            self.jobs,
+            [("tenant_id", ASCENDING), ("idempotency_key", ASCENDING)],
             unique=True,
-            sparse=True,
+            partialFilterExpression={"idempotency_key": {"$type": "string"}},
         )
-        await self.audit_logs.create_index([("tenant_id", 1), ("created_at", -1)])
-        await self.database["cdkeys"].create_index([("tenant_id", 1), ("code", 1)], unique=True)
+        await _safe_create_index(self.audit_logs, [("tenant_id", ASCENDING), ("created_at", DESCENDING)])
+        await _safe_create_index(self.database["cdkeys"], [("tenant_id", ASCENDING), ("code", ASCENDING)], unique=True)
         await self.ensure_admin_config()
 
     async def ensure_admin_config(self) -> dict[str, Any]:

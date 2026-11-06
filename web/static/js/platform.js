@@ -295,7 +295,9 @@
     }
   }
 
-  Object.assign(window.FSB, {
+  const _platformExports = {
+    tenants: renderAdminTenantsOverview,
+    security: renderAdminSecuritySettings,
     refreshAdminTenantSelector: refreshAdminTenantSelector,
     onAdminTenantSelect: onAdminTenantSelect,
     selectAndManageTenant: selectAndManageTenant,
@@ -304,5 +306,7 @@
     toggleTenantEnable: toggleTenantEnable,
     deleteTenantByAdmin: deleteTenantByAdmin,
     renderAdminSecuritySettings: renderAdminSecuritySettings,
-  });
+  };
+  Object.assign(window.FSB, _platformExports);
+  window.Platform = Object.assign(window.Platform || {}, _platformExports);
 })();

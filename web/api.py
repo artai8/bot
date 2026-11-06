@@ -50,7 +50,7 @@ async def serve_dynamic_admin(request: web.Request) -> web.StreamResponse:
 
 
 async def health_live(_request: web.Request) -> web.Response:
-    return web.json_response({"status": "alive"})
+    return web.json_response({"status": "alive", "ok": True})
 
 
 async def health_ready(_request: web.Request) -> web.Response:
@@ -58,7 +58,7 @@ async def health_ready(_request: web.Request) -> web.Response:
     status = "ready" if db_ok else "degraded"
     code = 200 if db_ok else 503
     return web.json_response(
-        {"status": status, "database": "ready" if db_ok else "unavailable"},
+        {"status": status, "ok": db_ok, "database": "ready" if db_ok else "unavailable"},
         status=code,
     )
 
@@ -68,6 +68,7 @@ def setup_api_routes(app: web.Application) -> None:
     setup_platform_routes(app)
     setup_tenant_routes(app)
     app.router.add_get("/", serve_index)
+    app.router.add_get("/api/health", health_ready)
     app.router.add_get("/health/live", health_live)
     app.router.add_get("/health/ready", health_ready)
     app.router.add_get("/health", health_ready)
